@@ -6,29 +6,6 @@
 
 ---
 
-## Índice
-
-1. [O problema](#1-o-problema)
-2. [A proposta](#2-a-proposta)
-3. [Princípios de design](#3-princípios-de-design)
-4. [Público-alvo](#4-público-alvo)
-5. [O que é lumn](#5-o-que-é-lumn)
-6. [A linguagem de workflows](#6-a-linguagem-de-workflows)
-7. [Ecossistema de plugins](#7-ecossistema-de-plugins)
-8. [Interface visual](#8-interface-visual)
-9. [Gerenciamento de credenciais](#9-gerenciamento-de-credenciais)
-10. [Data Tables](#10-data-tables)
-11. [Triggers](#11-triggers)
-12. [CLI e daemon](#12-cli-e-daemon)
-13. [Integração com IA via MCP](#13-integração-com-ia-via-mcp)
-14. [Deploy e operação](#14-deploy-e-operação)
-15. [Arquitetura e design técnico](#15-arquitetura-e-design-técnico)
-16. [Comparativo com alternativas](#16-comparativo-com-alternativas)
-17. [Roadmap de produto](#17-roadmap-de-produto)
-18. [Posicionamento open source](#18-posicionamento-open-source)
-
----
-
 ## 1. O problema
 
 Automação de processos de negócio é uma necessidade universal. Toda equipe de engenharia acaba construindo — ou adotando — algum sistema que conecta APIs, processa dados, dispara ações e reage a eventos. O mercado atual oferece duas escolhas, e ambas apresentam limitações sérias.
@@ -215,16 +192,16 @@ Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/fil
 
 A DSL oferece um vocabulário pequeno e ortogonal. Cada primitivo tem um contrato único e não se sobrepõe a nenhum outro:
 
-| Primitivo | O que faz | Muta o item? |
-|---|---|---|
-| `exec` | Executa um callable (plugin); o resultado fica disponível no próximo `set` | Não |
-| `tap` | Efeito colateral puro; resultado é descartado | Nunca |
-| `set` | Lê `res` (output do `exec` anterior), `item` e `ctx`; retorna o item atualizado | Sim |
-| `filter` | Remove itens onde a condição retorna falso | Não |
-| `distinct` | Remove duplicatas por chave | Não |
-| `branch` | Roteia para sub-pipeline baseado em condição | Condicional |
-| `once` | Executa um callable uma única vez para todo o lote; salva no contexto | Não |
-| `parallel` | Executa sub-pipelines concorrentemente e converge | Depende do sub-pipeline |
+| Primitivo  | O que faz                                                                       | Muta o item?            |
+| ---------- | ------------------------------------------------------------------------------- | ----------------------- |
+| `exec`     | Executa um callable (plugin); o resultado fica disponível no próximo `set`      | Não                     |
+| `tap`      | Efeito colateral puro; resultado é descartado                                   | Nunca                   |
+| `set`      | Lê `res` (output do `exec` anterior), `item` e `ctx`; retorna o item atualizado | Sim                     |
+| `filter`   | Remove itens onde a condição retorna falso                                      | Não                     |
+| `distinct` | Remove duplicatas por chave                                                     | Não                     |
+| `branch`   | Roteia para sub-pipeline baseado em condição                                    | Condicional             |
+| `once`     | Executa um callable uma única vez para todo o lote; salva no contexto           | Não                     |
+| `parallel` | Executa sub-pipelines concorrentemente e converge                               | Depende do sub-pipeline |
 
 ### O primitivo `set`
 
@@ -236,7 +213,7 @@ set(function(res, item, ctx)
   --      nil se não houve exec antes deste set
   -- item: estado atual do item na pipeline
   -- ctx: contexto global do workflow (compartilhado entre todos os items)
-  
+
   item.campo = res.valor
   return item
 end)
@@ -481,19 +458,19 @@ Esse modelo tem três consequências importantes:
 
 O lumn vem com uma biblioteca padrão de plugins mantida pela equipe principal:
 
-| Plugin | Descrição | Credential command |
-|---|---|---|
-| `lumn/http` | Cliente HTTP genérico com auth, retry e paginação | — |
-| `lumn/smtp` | Envio de e-mail via SMTP | `lumn credential add smtp` |
-| `lumn/sendgrid` | Envio via SendGrid API | `lumn credential add sendgrid` |
-| `lumn/outlook` | E-mails via Microsoft Graph API | `lumn credential add outlook` |
-| `lumn/gdrive` | Arquivos via Google Drive API | `lumn credential add gdrive` |
-| `lumn/slack` | Mensagens para canais Slack | `lumn credential add slack` |
-| `lumn/aws-s3` | Objetos no Amazon S3 | `lumn credential add aws` |
-| `lumn/openai` | Modelos GPT via OpenAI API | `lumn credential add openai` |
-| `lumn/azure-openai` | GPT via Azure OpenAI Service | `lumn credential add azure-openai` |
-| `lumn/ai` | Primitivos de IA: agent, schema, model | — |
-| `lumn/data` | Acesso às Data Tables integradas | — |
+| Plugin              | Descrição                                         | Credential command                 |
+| ------------------- | ------------------------------------------------- | ---------------------------------- |
+| `lumn/http`         | Cliente HTTP genérico com auth, retry e paginação | —                                  |
+| `lumn/smtp`         | Envio de e-mail via SMTP                          | `lumn credential add smtp`         |
+| `lumn/sendgrid`     | Envio via SendGrid API                            | `lumn credential add sendgrid`     |
+| `lumn/outlook`      | E-mails via Microsoft Graph API                   | `lumn credential add outlook`      |
+| `lumn/gdrive`       | Arquivos via Google Drive API                     | `lumn credential add gdrive`       |
+| `lumn/slack`        | Mensagens para canais Slack                       | `lumn credential add slack`        |
+| `lumn/aws-s3`       | Objetos no Amazon S3                              | `lumn credential add aws`          |
+| `lumn/openai`       | Modelos GPT via OpenAI API                        | `lumn credential add openai`       |
+| `lumn/azure-openai` | GPT via Azure OpenAI Service                      | `lumn credential add azure-openai` |
+| `lumn/ai`           | Primitivos de IA: agent, schema, model            | —                                  |
+| `lumn/data`         | Acesso às Data Tables integradas                  | —                                  |
 
 ### Criando um plugin
 
@@ -583,6 +560,7 @@ O lumn trata credenciais como um recurso de primeira classe com garantias explí
 Todas as credenciais são armazenadas em um vault local criptografado com **AES-256-GCM**. A chave de criptografia é derivada de uma master password via **Argon2id** — o algoritmo recomendado pelo OWASP para key derivation.
 
 As credenciais nunca aparecem em:
+
 - Logs de execução (em nenhum nível de verbosidade)
 - Output do terminal
 - Serialização de items da pipeline
@@ -845,17 +823,17 @@ lumn mcp --transport sse --port 3001
 
 O servidor MCP expõe ferramentas que o LLM pode chamar durante uma conversa:
 
-| Ferramenta | O que faz |
-|---|---|
-| `list_workflows` | Lista todos os workflows com status, última execução e triggers |
-| `get_workflow` | Retorna o conteúdo do `init.lua` de um workflow |
-| `create_workflow` | Gera um `init.lua` a partir de descrição em linguagem natural |
-| `run_workflow` | Executa um workflow e retorna resultado estruturado por step |
-| `get_logs` | Busca logs por workflow, step, status e intervalo de tempo |
-| `validate_workflow` | Valida sintaxe e DAG, retorna erros com sugestões de correção |
-| `install_plugin` | Instala um plugin necessário para o workflow |
-| `list_plugins` | Lista plugins instalados com callables disponíveis e tipos |
-| `get_execution` | Retorna o estado detalhado de uma execução específica |
+| Ferramenta          | O que faz                                                       |
+| ------------------- | --------------------------------------------------------------- |
+| `list_workflows`    | Lista todos os workflows com status, última execução e triggers |
+| `get_workflow`      | Retorna o conteúdo do `init.lua` de um workflow                 |
+| `create_workflow`   | Gera um `init.lua` a partir de descrição em linguagem natural   |
+| `run_workflow`      | Executa um workflow e retorna resultado estruturado por step    |
+| `get_logs`          | Busca logs por workflow, step, status e intervalo de tempo      |
+| `validate_workflow` | Valida sintaxe e DAG, retorna erros com sugestões de correção   |
+| `install_plugin`    | Instala um plugin necessário para o workflow                    |
+| `list_plugins`      | Lista plugins instalados com callables disponíveis e tipos      |
+| `get_execution`     | Retorna o estado detalhado de uma execução específica           |
 
 ### Contexto injetado automaticamente
 
@@ -903,6 +881,7 @@ lumn deploy --tag minha-loja:v1.2.0
 ```
 
 A imagem gerada inclui:
+
 - O binário do lumn
 - Todos os `init.lua` e assets de cada pasta de workflow
 - Os plugins instalados compilados para a arquitetura alvo
@@ -954,16 +933,16 @@ Um endpoint `/health` retorna o status de saúde do daemon e de cada workflow re
 
 ### Stack tecnológica
 
-| Componente | Tecnologia | Justificativa |
-|---|---|---|
-| Engine + CLI + Daemon | Go | Binário único, goroutines para concorrência, cross-platform trivial |
-| Lua VM | gopher-lua | Lua 5.1 em Go puro — sem CGo, compila em qualquer plataforma |
-| Storage de execução | SQLite (modernc/sqlite) | Sem CGo, zero dependências externas, queries ad-hoc para logs e Data Tables |
-| Vault de credenciais | BBolt + AES-256-GCM | K/V embarcado em Go, chave derivada via Argon2id |
-| Comunicação plugin-engine | gRPC | Isolamento de processo, interface tipada, linguagem-agnóstico |
-| Web UI | SvelteKit + TypeScript | Bundle pequeno, assets via `embed.FS` do Go — sem servidor Node separado |
-| Live updates | WebSocket nativo | Baixa latência, sem biblioteca extra |
-| MCP server | mcp-go SDK | Protocolo padrão de integração com LLMs |
+| Componente                | Tecnologia              | Justificativa                                                               |
+| ------------------------- | ----------------------- | --------------------------------------------------------------------------- |
+| Engine + CLI + Daemon     | Go                      | Binário único, goroutines para concorrência, cross-platform trivial         |
+| Lua VM                    | gopher-lua              | Lua 5.1 em Go puro — sem CGo, compila em qualquer plataforma                |
+| Storage de execução       | SQLite (modernc/sqlite) | Sem CGo, zero dependências externas, queries ad-hoc para logs e Data Tables |
+| Vault de credenciais      | BBolt + AES-256-GCM     | K/V embarcado em Go, chave derivada via Argon2id                            |
+| Comunicação plugin-engine | gRPC                    | Isolamento de processo, interface tipada, linguagem-agnóstico               |
+| Web UI                    | SvelteKit + TypeScript  | Bundle pequeno, assets via `embed.FS` do Go — sem servidor Node separado    |
+| Live updates              | WebSocket nativo        | Baixa latência, sem biblioteca extra                                        |
+| MCP server                | mcp-go SDK              | Protocolo padrão de integração com LLMs                                     |
 
 ### Modelo de execução
 
@@ -1024,21 +1003,21 @@ lumn/
 
 ## 16. Comparativo com alternativas
 
-| Critério | lumn | n8n | Airflow | Temporal |
-|---|---|---|---|---|
-| **Linguagem de definição** | Lua DSL (arquivo) | Visual (JSON) | Python | Go / Java / TS |
-| **Estrutura do projeto** | Pastas com `init.lua` | BD interno | Módulos Python | Código nativo |
-| **Versionamento com Git** | Nativo | Export JSON | Nativo | Nativo |
-| **Testabilidade** | `lumn run` local | Manual | pytest | SDK próprio |
-| **Instalação** | Binário único | Docker pesado | pip + infra | Cluster + servidor |
-| **Curva de aprendizado** | Baixa | Baixa | Alta | Muito alta |
-| **Lógica condicional** | Lua nativo | Expressões limitadas | Python nativo | Código nativo |
-| **Plugin ecosystem** | Git-based, aberto | Integrado, fechado | Providers | SDK específico |
-| **Setup de credenciais** | Guiado por plugin | Manual / UI | Connections UI | Manual |
-| **Paralelismo** | `parallel {}` nativo | Limitado | TaskGroups | Nativo |
-| **Encerramento por lista vazia** | Automático | — | — | Manual |
-| **Deploy container** | `lumn deploy` | Docker Compose | Helm chart | Temporal Cloud |
-| **Caso de uso ideal** | Integrações de negócio | Automações simples | Pipelines de dados | Long-running |
+| Critério                         | lumn                   | n8n                  | Airflow            | Temporal           |
+| -------------------------------- | ---------------------- | -------------------- | ------------------ | ------------------ |
+| **Linguagem de definição**       | Lua DSL (arquivo)      | Visual (JSON)        | Python             | Go / Java / TS     |
+| **Estrutura do projeto**         | Pastas com `init.lua`  | BD interno           | Módulos Python     | Código nativo      |
+| **Versionamento com Git**        | Nativo                 | Export JSON          | Nativo             | Nativo             |
+| **Testabilidade**                | `lumn run` local       | Manual               | pytest             | SDK próprio        |
+| **Instalação**                   | Binário único          | Docker pesado        | pip + infra        | Cluster + servidor |
+| **Curva de aprendizado**         | Baixa                  | Baixa                | Alta               | Muito alta         |
+| **Lógica condicional**           | Lua nativo             | Expressões limitadas | Python nativo      | Código nativo      |
+| **Plugin ecosystem**             | Git-based, aberto      | Integrado, fechado   | Providers          | SDK específico     |
+| **Setup de credenciais**         | Guiado por plugin      | Manual / UI          | Connections UI     | Manual             |
+| **Paralelismo**                  | `parallel {}` nativo   | Limitado             | TaskGroups         | Nativo             |
+| **Encerramento por lista vazia** | Automático             | —                    | —                  | Manual             |
+| **Deploy container**             | `lumn deploy`          | Docker Compose       | Helm chart         | Temporal Cloud     |
+| **Caso de uso ideal**            | Integrações de negócio | Automações simples   | Pipelines de dados | Long-running       |
 
 ### Onde o lumn não é a escolha certa
 
@@ -1055,31 +1034,37 @@ Honestidade sobre limitações é parte do posicionamento:
 O desenvolvimento está organizado em fases, cada uma entregando valor utilizável de forma independente.
 
 ### Phase 0 — Foundation (semanas 1–6)
+
 Engine core: VM Lua embarcada, global `lumn` com primitivos da DSL, DAG builder, executor sequencial e CLI básica (`init`, `run`, `validate`).
 
 **Milestone:** `lumn run order_cancel/` executa o workflow de cancelamento do tutorial no terminal, mostrando o log de cada step, com output correto e erros com stack trace.
 
 ### Phase 1 — Runtime local (semanas 7–14)
+
 Daemon (`lumnd`), triggers (scheduler, webhook, file watcher), paralelismo via goroutine pool, credential vault com `CredentialSpec` para plugins, e execution logs em SQLite.
 
 **Milestone:** `lumn start order_cancel/` ativa o scheduler. O workflow roda a cada 15 minutos. `lumn logs order_cancel` mostra o histórico de execuções.
 
 ### Phase 2 — Visual environment (semanas 15–22)
+
 Web UI com DAG visualizer em tempo real via WebSocket, execution history completo, step inspector com `res`/`item` por execução, credential manager UI e Data Tables.
 
 **Milestone:** O desenvolvedor abre `lumn ui`, clica num step com erro e vê o stack trace, o valor de `res` e o `item` exatamente como estavam no momento da falha.
 
 ### Phase 3 — Plugin ecosystem (semanas 23–28)
+
 Plugin registry baseado em Git com formato `usuario/plugin` e `usuario/path/plugin`, `lumn.lock` para reprodutibilidade, Plugin SDK completo com `CredentialSpec`, biblioteca padrão e sandboxing por subprocess gRPC.
 
 **Milestone:** `lumn plugin add pretodev/outlook` instala o plugin. `lumn credential add outlook` abre o browser para OAuth. `lumn.outlook.client {}` funciona no `init.lua` sem configuração adicional.
 
 ### Phase 4 — MCP + AI (semanas 29–32)
+
 Servidor MCP com todas as ferramentas documentadas, context injection automático de plugins e credenciais disponíveis, e suporte a criação de workflows via linguagem natural.
 
 **Milestone:** Descrever o workflow de cancelamento ao Claude no Cursor. Receber um `init.lua` correto usando os plugins instalados, pronto para `lumn validate` e `lumn start`.
 
 ### Phase 5 — Deploy e produção (semanas 33–40)
+
 `lumn deploy`, Docker multi-stage com imagem < 50MB, VPS setup script com systemd, métricas Prometheus, multi-environment com profiles e backup/restore do vault.
 
 **Milestone:** `lumn deploy --tag minha-loja:v1.0.0 && docker run ... minha-loja:v1.0.0` — todos os workflows rodam, UI acessível, métricas em `/metrics`.
@@ -1120,4 +1105,4 @@ O `CONTRIBUTING.md` cobre setup do ambiente de desenvolvimento, convenções de 
 
 ---
 
-*Este documento descreve a visão do produto lumn. Para a especificação técnica de implementação, consulte `SPEC.md`. Para o status atual de desenvolvimento, consulte `CHANGELOG.md`.*
+_Este documento descreve a visão do produto lumn. Para a especificação técnica de implementação, consulte `SPEC.md`. Para o status atual de desenvolvimento, consulte `CHANGELOG.md`._
