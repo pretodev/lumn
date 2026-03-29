@@ -13,10 +13,11 @@ import (
 )
 
 type Target struct {
-	Input       string
-	InitPath    string
-	WorkflowDir string
-	Name        string
+	Input        string
+	InitPath     string
+	WorkspaceDir string
+	WorkflowDir  string
+	Name         string
 }
 
 func ResolveTarget(input string) (Target, error) {
@@ -45,6 +46,10 @@ func ResolveTarget(input string) (Target, error) {
 		target.InitPath = absInput
 		target.WorkflowDir = filepath.Dir(absInput)
 	}
+	target.WorkspaceDir, err = inferWorkspaceDir(target.WorkflowDir)
+	if err != nil {
+		return Target{}, errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, err.Error(), err)
+	}
 	target.Name = filepath.Base(target.WorkflowDir)
 	return target, nil
 }
@@ -55,7 +60,7 @@ func LoadTarget(input string, stderr io.Writer) (*dag.Workflow, Target, error) {
 		return nil, target, err
 	}
 
-	rt, err := luaenv.NewRuntime(target.WorkflowDir, stderr)
+	rt, err := luaenv.NewRuntime(target.WorkflowDir, target.WorkspaceDir, stderr)
 	if err != nil {
 		return nil, target, err
 	}
@@ -139,4 +144,58 @@ func fallbackName(input, resolved string) string {
 		return "workflow"
 	}
 	return filepath.Base(filepath.Clean(input))
+}
+
+func inferWorkspaceDir(workflowDir string) (string, error) {
+	current := workflowDir
+	for {
+		found, err := hasWorkspaceMarker(current)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			return current, nil
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	parent := filepath.Dir(workflowDir)
+	if parent == "" {
+		return workflowDir, nil
+	}
+	return parent, nil
+}
+
+func hasWorkspaceMarker(dir string) (bool, error) {
+	for _, name := range []string{"lumn.lock", "lumn.config.lua"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true, nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, "lumn.config.*.lua"))
+	if err != nil {
+		return false, err
+	}
+	if len(matches) > 0 {
+		return true, nil
+	}
+
+	sharedPath := filepath.Join(dir, "_shared")
+	info, err := os.Stat(sharedPath)
+	if err == nil && info.IsDir() {
+		return true, nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+
+	return false, nil
 }

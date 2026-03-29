@@ -28,8 +28,7 @@ type ReportError struct {
 }
 
 type itemState struct {
-	ItemRef       string
-	PendingResRef string
+	ItemRef string
 }
 
 func Run(workflow *dag.Workflow) (Report, error) {
@@ -41,54 +40,53 @@ func Run(workflow *dag.Workflow) (Report, error) {
 	}
 
 	rt := workflow.Runtime
-	ctxRef := rt.NewTableRef()
+	stateRef := rt.NewTableRef()
+	rt.SetExecutionState(stateRef)
+	defer rt.SetExecutionState("")
+
 	items := []itemState{}
 
-	for idx, node := range workflow.Nodes {
+	for _, node := range workflow.Nodes {
 		switch node.Kind {
-		case primitive.Exec:
-			if idx == 0 {
-				sourceRef, err := rt.CallCallable(node.CallableRef, "", ctxRef)
+		case primitive.Call:
+			sourceRef, err := rt.CallCallable(node.CallableRef, "", stateRef)
+			if err != nil {
+				return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
+			}
+			if rt.RefType(sourceRef) != golua.TypeTable {
+				return report, &errkind.Error{
+					Code:      errkind.ErrRuntime,
+					Type:      errkind.TypeRuntime,
+					Message:   "call exec must return a table-array of results",
+					Primitive: string(node.Kind),
+					Position:  node.Position,
+					Callable:  node.CallableName,
+				}
+			}
+
+			items = make([]itemState, 0, rt.TableLen(sourceRef))
+			for i := 1; i <= rt.TableLen(sourceRef); i++ {
+				resultRef := rt.ArrayValueRef(sourceRef, i)
+				refs, err := rt.CallFunction(node.OnDataRef, 1, resultRef)
 				if err != nil {
 					return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
 				}
-				if rt.RefType(sourceRef) != golua.TypeTable {
+				if len(refs) != 1 || rt.RefType(refs[0]) == golua.TypeNil {
 					return report, &errkind.Error{
 						Code:      errkind.ErrRuntime,
 						Type:      errkind.TypeRuntime,
-						Message:   "first exec must return a table-array of items",
+						Message:   "call on_data must return item, got nil",
 						Primitive: string(node.Kind),
 						Position:  node.Position,
 						Callable:  node.CallableName,
 					}
 				}
-
-				items = make([]itemState, 0, rt.TableLen(sourceRef))
-				for i := 1; i <= rt.TableLen(sourceRef); i++ {
-					itemRef := rt.ArrayValueRef(sourceRef, i)
-					items = append(items, itemState{
-						ItemRef:       itemRef,
-						PendingResRef: itemRef,
-					})
-				}
-				report.ItemsIn = len(items)
-				if len(items) == 0 {
-					report.ItemsOut = 0
-				}
-				continue
+				items = append(items, itemState{ItemRef: refs[0]})
 			}
-
-			for i := range items {
-				resRef, err := rt.CallCallable(node.CallableRef, items[i].ItemRef, ctxRef)
-				if err != nil {
-					return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
-				}
-				items[i].PendingResRef = resRef
-			}
+			report.ItemsIn = len(items)
 		case primitive.Set:
 			for i := range items {
-				resRef := items[i].PendingResRef
-				refs, err := rt.CallFunction(node.FnRef, 1, resRef, items[i].ItemRef, ctxRef)
+				refs, err := rt.CallFunction(node.FnRef, 1, items[i].ItemRef)
 				if err != nil {
 					return report, errkind.WithContext(err, string(node.Kind), node.Position, "")
 				}
@@ -96,18 +94,17 @@ func Run(workflow *dag.Workflow) (Report, error) {
 					return report, &errkind.Error{
 						Code:      errkind.ErrRuntime,
 						Type:      errkind.TypeRuntime,
-						Message:   "set must return item, got nil",
+						Message:   "set.to must return item, got nil",
 						Primitive: string(node.Kind),
 						Position:  node.Position,
 					}
 				}
 				items[i].ItemRef = refs[0]
-				items[i].PendingResRef = ""
 			}
 		case primitive.Filter:
 			filtered := make([]itemState, 0, len(items))
 			for i := range items {
-				refs, err := rt.CallFunction(node.FnRef, 1, items[i].ItemRef, ctxRef)
+				refs, err := rt.CallFunction(node.FnRef, 1, items[i].ItemRef)
 				if err != nil {
 					return report, errkind.WithContext(err, string(node.Kind), node.Position, "")
 				}
@@ -115,7 +112,7 @@ func Run(workflow *dag.Workflow) (Report, error) {
 					return report, &errkind.Error{
 						Code:      errkind.ErrRuntime,
 						Type:      errkind.TypeRuntime,
-						Message:   "filter must return a boolean",
+						Message:   "filter.condition must return a boolean",
 						Primitive: string(node.Kind),
 						Position:  node.Position,
 					}
@@ -128,7 +125,7 @@ func Run(workflow *dag.Workflow) (Report, error) {
 					return report, &errkind.Error{
 						Code:      errkind.ErrRuntime,
 						Type:      errkind.TypeRuntime,
-						Message:   "filter must return a boolean",
+						Message:   "filter.condition must return a boolean",
 						Primitive: string(node.Kind),
 						Position:  node.Position,
 					}
@@ -142,10 +139,10 @@ func Run(workflow *dag.Workflow) (Report, error) {
 			for i := range items {
 				clonedRef, err := rt.CloneRef(items[i].ItemRef)
 				if err != nil {
-					return report, errkind.WithContext(err, string(node.Kind), node.Position, "")
+					return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
 				}
-				if _, err := rt.CallFunction(node.FnRef, 0, clonedRef, ctxRef); err != nil {
-					return report, errkind.WithContext(err, string(node.Kind), node.Position, "")
+				if _, err := rt.CallCallable(node.CallableRef, clonedRef, stateRef); err != nil {
+					return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
 				}
 			}
 		default:
@@ -159,15 +156,17 @@ func Run(workflow *dag.Workflow) (Report, error) {
 		}
 
 		if len(items) == 0 {
+			report.Status = "empty"
 			report.ItemsOut = 0
 			return report, nil
 		}
 	}
 
-	if report.ItemsIn == 0 && len(workflow.Nodes) == 0 {
+	if len(workflow.Nodes) == 0 {
 		report.ItemsOut = 0
 		return report, nil
 	}
+
 	report.ItemsOut = len(items)
 	return report, nil
 }

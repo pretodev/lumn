@@ -53,21 +53,39 @@ local items = {
   { id = 3, nome = "Item C", valor = 200 },
 }
 
+local log_item = {
+  name = "log_item",
+  run = function(input)
+    print(input.nome .. " aprovado")
+  end
+}
+
 return {
   id = "pedidos",
   version = "1.0.0",
   flow = {
-    exec(lumn.test_source(items)),
-    set(function(res, item, ctx)
-      item.processado = true
-      return item
-    end),
-    filter(function(item, ctx)
-      return item.valor > 80
-    end),
-    tap(function(item, ctx)
-      print(item.nome .. " aprovado")
-    end),
+    call {
+      exec = lumn.test_source(items),
+      on_data = function(result)
+        return result
+      end,
+    },
+    set {
+      to = function(item)
+        lumn.set("ultimo_item_id", item.id)
+        item.ultimo_item_id = lumn.get("ultimo_item_id")
+        item.processado = true
+        return item
+      end,
+    },
+    filter {
+      condition = function(item)
+        return item.valor > 80
+      end,
+    },
+    tap {
+      exec = log_item,
+    },
   }
 }
 `)
@@ -95,41 +113,38 @@ return {
 	}
 }
 
-func TestRunUsesCurrentItemForLaterExec(t *testing.T) {
+func TestRunUsesWorkflowStateAcrossSteps(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	workflowDir := filepath.Join(root, "current-item")
+	workflowDir := filepath.Join(root, "stateful")
 	mustWriteWorkflow(t, workflowDir, `
 local items = {
   { id = 1, valor = 10 },
   { id = 2, valor = 20 },
 }
 
-local copier = {
-  name = "copier",
-  run = function(input, ctx)
-    return { base = input.base }
-  end
-}
-
 return {
-  id = "current-item",
+  id = "stateful",
   version = "1.0.0",
   flow = {
-    exec(lumn.test_source(items)),
-    set(function(res, item, ctx)
-      item.base = item.valor + 1
-      return item
-    end),
-    exec(copier),
-    set(function(res, item, ctx)
-      item.echo = res.base
-      return item
-    end),
-    filter(function(item, ctx)
-      return item.echo == item.base
-    end),
+    call {
+      exec = lumn.test_source(items),
+      on_data = function(result)
+        return result
+      end,
+    },
+    set {
+      to = function(item)
+        lumn.set("threshold", 15)
+        return item
+      end,
+    },
+    filter {
+      condition = function(item)
+        return item.valor >= lumn.get("threshold")
+      end,
+    },
   }
 }
 `)
@@ -138,10 +153,56 @@ return {
 	if code != 0 {
 		t.Fatalf("run exit = %d, stderr = %q stdout = %q", code, stderr, stdout)
 	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
 
 	report := decodeReport(t, stdout)
-	if report.ItemsIn != 2 || report.ItemsOut != 2 {
-		t.Fatalf("expected later exec to receive current item, got %+v", report)
+	if report.Status != "ok" || report.ItemsIn != 2 || report.ItemsOut != 1 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestRunEmptyStatusWhenFilterRemovesAllItems(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "empty-after-filter")
+	mustWriteWorkflow(t, workflowDir, `
+local items = {
+  { id = 1, valor = 10 },
+}
+
+return {
+  id = "empty-after-filter",
+  version = "1.0.0",
+  flow = {
+    call {
+      exec = lumn.test_source(items),
+      on_data = function(result)
+        return result
+      end,
+    },
+    filter {
+      condition = function(item)
+        return item.valor > 999
+      end,
+    },
+  }
+}
+`)
+
+	code, stdout, stderr := runCLI(t, "run", workflowDir)
+	if code != 0 {
+		t.Fatalf("run exit = %d, stderr = %q stdout = %q", code, stderr, stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+
+	report := decodeReport(t, stdout)
+	if report.Status != "empty" || report.ItemsIn != 1 || report.ItemsOut != 0 {
+		t.Fatalf("unexpected report: %+v", report)
 	}
 }
 
@@ -182,13 +243,17 @@ return {
 			wantStderr: `"id"`,
 		},
 		{
-			name: "unknown primitive",
-			args: []string{"validate", writeWorkflow("unknown", `
+			name: "old exec syntax rejected",
+			args: []string{"validate", writeWorkflow("old-exec", `
+local items = {
+  { id = 1 },
+}
+
 return {
-  id = "unknown",
+  id = "old-exec",
   version = "1.0.0",
   flow = {
-    merge(function(item) return item end),
+    exec(lumn.test_source(items)),
   }
 }
 `)},
@@ -196,13 +261,112 @@ return {
 			wantStderr: `unknown primitive`,
 		},
 		{
-			name: "invalid signature",
+			name: "flow must start with call",
+			args: []string{"validate", writeWorkflow("must-start-with-call", `
+return {
+  id = "must-start-with-call",
+  version = "1.0.0",
+  flow = {
+    set {
+      to = function(item)
+        return item
+      end,
+    },
+  }
+}
+`)},
+			wantCode:   3,
+			wantStderr: `must start with call`,
+		},
+		{
+			name: "call missing on_data",
+			args: []string{"validate", writeWorkflow("call-missing-on-data", `
+return {
+  id = "call-missing-on-data",
+  version = "1.0.0",
+  flow = {
+    call {
+      exec = lumn.test_source({}),
+    },
+  }
+}
+`)},
+			wantCode:   5,
+			wantStderr: `"on_data"`,
+		},
+		{
+			name: "set missing to",
+			args: []string{"validate", writeWorkflow("set-missing-to", `
+return {
+  id = "set-missing-to",
+  version = "1.0.0",
+  flow = {
+    call {
+      exec = lumn.test_source({}),
+      on_data = function(result)
+        return result
+      end,
+    },
+    set {},
+  }
+}
+`)},
+			wantCode:   5,
+			wantStderr: `"to"`,
+		},
+		{
+			name: "filter missing condition",
+			args: []string{"validate", writeWorkflow("filter-missing-condition", `
+return {
+  id = "filter-missing-condition",
+  version = "1.0.0",
+  flow = {
+    call {
+      exec = lumn.test_source({}),
+      on_data = function(result)
+        return result
+      end,
+    },
+    filter {},
+  }
+}
+`)},
+			wantCode:   5,
+			wantStderr: `"condition"`,
+		},
+		{
+			name: "tap missing exec",
+			args: []string{"validate", writeWorkflow("tap-missing-exec", `
+return {
+  id = "tap-missing-exec",
+  version = "1.0.0",
+  flow = {
+    call {
+      exec = lumn.test_source({}),
+      on_data = function(result)
+        return result
+      end,
+    },
+    tap {},
+  }
+}
+`)},
+			wantCode:   5,
+			wantStderr: `"exec"`,
+		},
+		{
+			name: "invalid callable signature",
 			args: []string{"validate", writeWorkflow("invalid-signature", `
 return {
   id = "invalid-signature",
   version = "1.0.0",
   flow = {
-    exec({ name = "bad" }),
+    call {
+      exec = { name = "bad" },
+      on_data = function(result)
+        return result
+      end,
+    },
   }
 }
 `)},
@@ -234,10 +398,17 @@ return {
   id = "runtime",
   version = "1.0.0",
   flow = {
-    exec(lumn.test_source(items)),
-    set(function(res, item, ctx)
-      return nil
-    end),
+    call {
+      exec = lumn.test_source(items),
+      on_data = function(result)
+        return result
+      end,
+    },
+    set {
+      to = function(item)
+        return nil
+      end,
+    },
   }
 }
 `)},
@@ -257,7 +428,12 @@ return {
   id = "missing-callable",
   version = "1.0.0",
   flow = {
-    exec(fonte_que_nao_existe),
+    call {
+      exec = fonte_que_nao_existe,
+      on_data = function(result)
+        return result
+      end,
+    },
   }
 }
 `)},

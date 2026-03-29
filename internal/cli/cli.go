@@ -94,21 +94,39 @@ const initTemplate = `local items = {
   { id = 3, nome = "Item C", valor = 200 },
 }
 
+local log_item = {
+  name = "log_item",
+  run = function(input)
+    print(input.nome .. " aprovado")
+  end
+}
+
 return {
   id = "{{ .ID }}",
   version = "1.0.0",
   flow = {
-    exec(lumn.test_source(items)),
-    set(function(res, item, ctx)
-      item.processado = true
-      return item
-    end),
-    filter(function(item, ctx)
-      return item.valor > 80
-    end),
-    tap(function(item, ctx)
-      print(item.nome .. " aprovado")
-    end),
+    call {
+      exec = lumn.test_source(items),
+      on_data = function(result)
+        return result
+      end,
+    },
+    set {
+      to = function(item)
+        lumn.set("ultimo_item_id", item.id)
+        item.ultimo_item_id = lumn.get("ultimo_item_id")
+        item.processado = true
+        return item
+      end,
+    },
+    filter {
+      condition = function(item)
+        return item.valor > 80
+      end,
+    },
+    tap {
+      exec = log_item,
+    },
   }
 }
 `

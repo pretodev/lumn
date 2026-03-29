@@ -21,6 +21,7 @@ type Node struct {
 	Position     int
 	Ref          string
 	FnRef        string
+	OnDataRef    string
 	CallableRef  string
 	CallableName string
 }
@@ -37,15 +38,13 @@ func Build(rt *luaenv.Runtime, workflowRef string) (*Workflow, error) {
 	}
 
 	flowRef, ok := rt.TableRefFieldRef(workflowRef, "flow")
-	if !ok {
-		return nil, errkind.New(errkind.ErrStructure, errkind.TypeStructure, `workflow field "flow" must be a table`)
-	}
-	if rt.RefType(flowRef) != golua.TypeTable {
+	if !ok || rt.RefType(flowRef) != golua.TypeTable {
 		return nil, errkind.New(errkind.ErrStructure, errkind.TypeStructure, `workflow field "flow" must be a table`)
 	}
 
-	nodes := make([]Node, 0, rt.TableLen(flowRef))
-	for idx := 1; idx <= rt.TableLen(flowRef); idx++ {
+	flowLen := rt.TableLen(flowRef)
+	nodes := make([]Node, 0, flowLen)
+	for idx := 1; idx <= flowLen; idx++ {
 		nodeRef := rt.ArrayValueRef(flowRef, idx)
 		position := idx
 
@@ -86,67 +85,64 @@ func Build(rt *luaenv.Runtime, workflowRef string) (*Workflow, error) {
 			}
 		}
 
+		if position == 1 && node.Kind != primitive.Call {
+			return nil, &errkind.Error{
+				Code:      errkind.ErrStructure,
+				Type:      errkind.TypeStructure,
+				Message:   "non-empty flow must start with call",
+				Primitive: string(node.Kind),
+				Position:  position,
+			}
+		}
+		if position > 1 && node.Kind == primitive.Call {
+			return nil, &errkind.Error{
+				Code:      errkind.ErrStructure,
+				Type:      errkind.TypeStructure,
+				Message:   "call is only allowed as the first primitive in flow",
+				Primitive: string(node.Kind),
+				Position:  position,
+			}
+		}
+
 		switch node.Kind {
-		case primitive.Exec:
-			callableRef, ok := rt.TableRefFieldRef(nodeRef, "callable")
-			if !ok {
-				return nil, &errkind.Error{
-					Code:      errkind.ErrCallableNotFound,
-					Type:      errkind.TypeCallableNotFound,
-					Message:   "exec requires a resolvable callable",
-					Primitive: string(node.Kind),
-					Position:  position,
-				}
+		case primitive.Call:
+			if err := bindCallable(rt, &node, "exec"); err != nil {
+				return nil, err
 			}
-			if rt.IsMissingSymbolRef(callableRef) {
-				name, _ := rt.TableStringFieldRef(callableRef, "name")
-				return nil, &errkind.Error{
-					Code:      errkind.ErrCallableNotFound,
-					Type:      errkind.TypeCallableNotFound,
-					Message:   fmt.Sprintf("callable %q could not be resolved", name),
-					Primitive: string(node.Kind),
-					Position:  position,
-					Callable:  name,
-				}
-			}
-			if rt.RefType(callableRef) != golua.TypeTable {
+			onDataRef, ok := rt.TableRefFieldRef(nodeRef, "on_data")
+			if !ok || rt.RefType(onDataRef) != golua.TypeFunction {
 				return nil, &errkind.Error{
 					Code:      errkind.ErrInvalidSignature,
 					Type:      errkind.TypeInvalidSignature,
-					Message:   "exec expects a callable table",
+					Message:   `call expects a function in field "on_data"`,
 					Primitive: string(node.Kind),
 					Position:  position,
 				}
 			}
-			callableName, ok := rt.TableStringFieldRef(callableRef, "name")
-			if !ok || callableName == "" {
-				return nil, &errkind.Error{
-					Code:      errkind.ErrInvalidSignature,
-					Type:      errkind.TypeInvalidSignature,
-					Message:   "callable must define a non-empty name",
-					Primitive: string(node.Kind),
-					Position:  position,
-				}
+			node.OnDataRef = onDataRef
+		case primitive.Tap:
+			if err := bindCallable(rt, &node, "exec"); err != nil {
+				return nil, err
 			}
-			if rt.TableTypeFieldRef(callableRef, "run") != golua.TypeFunction {
-				return nil, &errkind.Error{
-					Code:      errkind.ErrInvalidSignature,
-					Type:      errkind.TypeInvalidSignature,
-					Message:   "callable must define a run function",
-					Primitive: string(node.Kind),
-					Position:  position,
-					Callable:  callableName,
-				}
-			}
-			node.CallableRef = callableRef
-			node.CallableName = callableName
-		case primitive.Set, primitive.Filter, primitive.Tap:
-			fnRef, ok := rt.TableRefFieldRef(nodeRef, "fn")
+		case primitive.Set:
+			fnRef, ok := rt.TableRefFieldRef(nodeRef, "to")
 			if !ok || rt.RefType(fnRef) != golua.TypeFunction {
 				return nil, &errkind.Error{
 					Code:      errkind.ErrInvalidSignature,
 					Type:      errkind.TypeInvalidSignature,
-					Message:   fmt.Sprintf("%s expects a function", node.Kind),
+					Message:   `set expects a function in field "to"`,
+					Primitive: string(node.Kind),
+					Position:  position,
+				}
+			}
+			node.FnRef = fnRef
+		case primitive.Filter:
+			fnRef, ok := rt.TableRefFieldRef(nodeRef, "condition")
+			if !ok || rt.RefType(fnRef) != golua.TypeFunction {
+				return nil, &errkind.Error{
+					Code:      errkind.ErrInvalidSignature,
+					Type:      errkind.TypeInvalidSignature,
+					Message:   `filter expects a function in field "condition"`,
 					Primitive: string(node.Kind),
 					Position:  position,
 				}
@@ -163,4 +159,62 @@ func Build(rt *luaenv.Runtime, workflowRef string) (*Workflow, error) {
 		Nodes:   nodes,
 		Runtime: rt,
 	}, nil
+}
+
+func bindCallable(rt *luaenv.Runtime, node *Node, field string) error {
+	callableRef, ok := rt.TableRefFieldRef(node.Ref, field)
+	if !ok {
+		return &errkind.Error{
+			Code:      errkind.ErrInvalidSignature,
+			Type:      errkind.TypeInvalidSignature,
+			Message:   fmt.Sprintf(`%s expects a callable in field %q`, node.Kind, field),
+			Primitive: string(node.Kind),
+			Position:  node.Position,
+		}
+	}
+	if rt.IsMissingSymbolRef(callableRef) {
+		name, _ := rt.TableStringFieldRef(callableRef, "name")
+		return &errkind.Error{
+			Code:      errkind.ErrCallableNotFound,
+			Type:      errkind.TypeCallableNotFound,
+			Message:   fmt.Sprintf("callable %q could not be resolved", name),
+			Primitive: string(node.Kind),
+			Position:  node.Position,
+			Callable:  name,
+		}
+	}
+	if rt.RefType(callableRef) != golua.TypeTable {
+		return &errkind.Error{
+			Code:      errkind.ErrInvalidSignature,
+			Type:      errkind.TypeInvalidSignature,
+			Message:   fmt.Sprintf(`%s expects a callable table in field %q`, node.Kind, field),
+			Primitive: string(node.Kind),
+			Position:  node.Position,
+		}
+	}
+
+	callableName, ok := rt.TableStringFieldRef(callableRef, "name")
+	if !ok || callableName == "" {
+		return &errkind.Error{
+			Code:      errkind.ErrInvalidSignature,
+			Type:      errkind.TypeInvalidSignature,
+			Message:   "callable must define a non-empty name",
+			Primitive: string(node.Kind),
+			Position:  node.Position,
+		}
+	}
+	if rt.TableTypeFieldRef(callableRef, "run") != golua.TypeFunction {
+		return &errkind.Error{
+			Code:      errkind.ErrInvalidSignature,
+			Type:      errkind.TypeInvalidSignature,
+			Message:   "callable must define a run function",
+			Primitive: string(node.Kind),
+			Position:  node.Position,
+			Callable:  callableName,
+		}
+	}
+
+	node.CallableRef = callableRef
+	node.CallableName = callableName
+	return nil
 }

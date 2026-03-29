@@ -4,7 +4,7 @@ package primitive
 type Kind string
 
 const (
-	Exec   Kind = "exec"
+	Call   Kind = "call"
 	Set    Kind = "set"
 	Filter Kind = "filter"
 	Tap    Kind = "tap"
@@ -12,7 +12,7 @@ const (
 
 func (k Kind) Valid() bool {
 	switch k {
-	case Exec, Set, Filter, Tap:
+	case Call, Set, Filter, Tap:
 		return true
 	default:
 		return false

@@ -15,11 +15,14 @@ import (
 
 const (
 	registryRuntimeKey      = "__lumn_runtime"
+	registryStateKey        = "__lumn_state"
 	registryPlaceholderMT   = "__lumn_placeholder_mt"
 	registryRefPrefix       = "__lumn_ref_"
 	kindField               = "__lumn_kind"
-	callableField           = "callable"
-	fnField                 = "fn"
+	execField               = "exec"
+	onDataField             = "on_data"
+	toField                 = "to"
+	conditionField          = "condition"
 	nameField               = "name"
 	descriptionField        = "description"
 	runField                = "run"
@@ -33,6 +36,7 @@ const (
 // Runtime owns the sandboxed Lua VM for a single workflow.
 type Runtime struct {
 	State        *golua.State
+	WorkspaceDir string
 	WorkflowDir  string
 	SharedDir    string
 	WorkflowName string
@@ -40,10 +44,14 @@ type Runtime struct {
 	nextRef      uint64
 }
 
-func NewRuntime(workflowDir string, stderr io.Writer) (*Runtime, error) {
+func NewRuntime(workflowDir, workspaceDir string, stderr io.Writer) (*Runtime, error) {
 	absDir, err := filepath.Abs(workflowDir)
 	if err != nil {
 		return nil, errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, fmt.Sprintf("resolve workflow directory: %v", err), err)
+	}
+	absWorkspaceDir, err := filepath.Abs(workspaceDir)
+	if err != nil {
+		return nil, errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, fmt.Sprintf("resolve workspace directory: %v", err), err)
 	}
 
 	if stderr == nil {
@@ -53,8 +61,9 @@ func NewRuntime(workflowDir string, stderr io.Writer) (*Runtime, error) {
 	l := golua.NewState()
 	rt := &Runtime{
 		State:        l,
+		WorkspaceDir: absWorkspaceDir,
 		WorkflowDir:  absDir,
-		SharedDir:    filepath.Join(filepath.Dir(absDir), "_shared"),
+		SharedDir:    filepath.Join(absWorkspaceDir, "_shared"),
 		WorkflowName: filepath.Base(absDir),
 		stderr:       stderr,
 	}
@@ -126,13 +135,23 @@ func (r *Runtime) PushRef(ref string) {
 	r.State.Field(golua.RegistryIndex, ref)
 }
 
+func (r *Runtime) SetExecutionState(stateRef string) {
+	if stateRef == "" {
+		r.State.PushNil()
+		r.State.SetField(golua.RegistryIndex, registryStateKey)
+		return
+	}
+	r.PushRef(stateRef)
+	r.State.SetField(golua.RegistryIndex, registryStateKey)
+}
+
 func (r *Runtime) RefType(ref string) golua.Type {
 	r.PushRef(ref)
 	defer r.State.Pop(1)
 	return r.State.TypeOf(-1)
 }
 
-func (r *Runtime) CallCallable(callableRef, inputRef, ctxRef string) (string, error) {
+func (r *Runtime) CallCallable(callableRef, inputRef, stateRef string) (string, error) {
 	l := r.State
 	top := l.Top()
 
@@ -149,7 +168,7 @@ func (r *Runtime) CallCallable(callableRef, inputRef, ctxRef string) (string, er
 	} else {
 		r.PushRef(inputRef)
 	}
-	r.PushRef(ctxRef)
+	r.PushRef(stateRef)
 
 	if err := l.ProtectedCall(2, 1, 0); err != nil {
 		defer l.SetTop(top)
@@ -318,6 +337,11 @@ func runtimeFromState(l *golua.State) *Runtime {
 	return nil
 }
 
+func pushExecutionState(l *golua.State) bool {
+	l.Field(golua.RegistryIndex, registryStateKey)
+	return l.IsTable(-1)
+}
+
 func (r *Runtime) installSandbox() {
 	l := r.State
 
@@ -412,26 +436,24 @@ func (r *Runtime) registerLumn() {
 	l := r.State
 
 	l.NewTable()
-	l.PushGoFunction(primitiveExec)
-	l.SetField(-2, "exec")
-	l.PushGoFunction(primitiveSet)
-	l.SetField(-2, "set")
-	l.PushGoFunction(primitiveFilter)
-	l.SetField(-2, "filter")
-	l.PushGoFunction(primitiveTap)
-	l.SetField(-2, "tap")
 	l.PushGoFunction(testSource)
 	l.SetField(-2, "test_source")
+	l.PushGoFunction(lumnGet)
+	l.SetField(-2, "get")
+	l.PushGoFunction(lumnSet)
+	l.SetField(-2, "set")
 
-	l.PushValue(-1)
 	l.SetGlobal("lumn")
 
-	for _, name := range []string{"exec", "set", "filter", "tap"} {
-		l.Field(-1, name)
+	for name, fn := range map[string]golua.Function{
+		"call":   primitiveCall,
+		"set":    primitiveSet,
+		"filter": primitiveFilter,
+		"tap":    primitiveTap,
+	} {
+		l.PushGoFunction(fn)
 		l.SetGlobal(name)
 	}
-
-	l.Pop(1)
 }
 
 func (r *Runtime) installMissingGlobalHandler() {
@@ -579,47 +601,55 @@ func requireFunc(l *golua.State) int {
 	return 1
 }
 
-func primitiveExec(l *golua.State) int {
-	l.NewTable()
-	l.PushString("exec")
-	l.SetField(-2, kindField)
-	if !l.IsNoneOrNil(1) {
-		l.PushValue(1)
-		l.SetField(-2, callableField)
+func lumnGet(l *golua.State) int {
+	key := golua.CheckString(l, 1)
+	if !pushExecutionState(l) {
+		return pushPrefixedError(l, runtimeErrorPrefix, "lumn.get is only available during execution")
 	}
+	l.Field(-1, key)
+	l.Remove(-2)
 	return 1
+}
+
+func lumnSet(l *golua.State) int {
+	key := golua.CheckString(l, 1)
+	if !pushExecutionState(l) {
+		return pushPrefixedError(l, runtimeErrorPrefix, "lumn.set is only available during execution")
+	}
+	if l.IsNoneOrNil(2) {
+		l.PushNil()
+	} else {
+		l.PushValue(2)
+	}
+	l.SetField(-2, key)
+	l.Pop(1)
+	return 0
+}
+
+func primitiveCall(l *golua.State) int {
+	return primitiveNode(l, "call")
 }
 
 func primitiveSet(l *golua.State) int {
-	l.NewTable()
-	l.PushString("set")
-	l.SetField(-2, kindField)
-	if !l.IsNoneOrNil(1) {
-		l.PushValue(1)
-		l.SetField(-2, fnField)
-	}
-	return 1
+	return primitiveNode(l, "set")
 }
 
 func primitiveFilter(l *golua.State) int {
-	l.NewTable()
-	l.PushString("filter")
-	l.SetField(-2, kindField)
-	if !l.IsNoneOrNil(1) {
-		l.PushValue(1)
-		l.SetField(-2, fnField)
-	}
-	return 1
+	return primitiveNode(l, "filter")
 }
 
 func primitiveTap(l *golua.State) int {
-	l.NewTable()
-	l.PushString("tap")
-	l.SetField(-2, kindField)
-	if !l.IsNoneOrNil(1) {
+	return primitiveNode(l, "tap")
+}
+
+func primitiveNode(l *golua.State, kind string) int {
+	if l.IsTable(1) {
 		l.PushValue(1)
-		l.SetField(-2, fnField)
+	} else {
+		l.NewTable()
 	}
+	l.PushString(kind)
+	l.SetField(-2, kindField)
 	return 1
 }
 
