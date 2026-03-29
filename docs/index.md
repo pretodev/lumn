@@ -6,6 +6,29 @@
 
 ---
 
+## Índice
+
+1. [O problema](#1-o-problema)
+2. [A proposta](#2-a-proposta)
+3. [Princípios de design](#3-princípios-de-design)
+4. [Público-alvo](#4-público-alvo)
+5. [O que é lumn](#5-o-que-é-lumn)
+6. [A linguagem de workflows](#6-a-linguagem-de-workflows)
+7. [Ecossistema de plugins](#7-ecossistema-de-plugins)
+8. [Interface visual](#8-interface-visual)
+9. [Gerenciamento de credenciais](#9-gerenciamento-de-credenciais)
+10. [Data Tables](#10-data-tables)
+11. [Triggers](#11-triggers)
+12. [CLI e daemon](#12-cli-e-daemon)
+13. [Integração com IA via MCP](#13-integração-com-ia-via-mcp)
+14. [Deploy e operação](#14-deploy-e-operação)
+15. [Arquitetura e design técnico](#15-arquitetura-e-design-técnico)
+16. [Comparativo com alternativas](#16-comparativo-com-alternativas)
+17. [Roadmap de produto](#17-roadmap-de-produto)
+18. [Posicionamento open source](#18-posicionamento-open-source)
+
+---
+
 ## 1. O problema
 
 Automação de processos de negócio é uma necessidade universal. Toda equipe de engenharia acaba construindo — ou adotando — algum sistema que conecta APIs, processa dados, dispara ações e reage a eventos. O mercado atual oferece duas escolhas, e ambas apresentam limitações sérias.
@@ -167,118 +190,230 @@ O `init.lua` retorna uma table com a definição completa do workflow. Não exis
 
 As ferramentas, integrações e primitivos da plataforma são acessados através do global `lumn`, injetado pelo runtime no momento da execução. Não existe `require` para recursos da plataforma — `lumn` é o namespace único de tudo que o engine oferece.
 
-```lua
--- Correto: acesso via global lumn
-local agent = lumn.ai.agent { ... }
-local client = lumn.http.client { ... }
+Na fase `engine-core`, a superfície implementada do runtime é propositalmente pequena:
 
--- Incorreto: require é para módulos Lua do projeto
-local utils = require "order_cancel.utils"   -- isso funciona para código local
+```lua
+lumn.test_source(items) -- fonte builtin para testes e desenvolvimento local
+lumn.get("key")         -- lê estado global do workflow
+lumn.set("key", value)  -- grava estado global do workflow
 ```
 
-Essa distinção é deliberada: `require` carrega arquivos do disco (código do projeto), `lumn.*` acessa recursos do runtime (plugins, primitivos, credenciais).
+Os primitivos atualmente disponíveis como globals são:
+
+```lua
+call   { ... }
+set    { ... }
+filter { ... }
+tap    { ... }
+```
+
+APIs como `lumn.http.*`, `lumn.ai.*`, `lumn.plugins.*`, triggers e primitivos adicionais aparecem nesta documentação apenas como direção de roadmap para fases futuras. Nesta PR, eles ainda não fazem parte da superfície executável.
 
 ### Modelo de pipeline
 
 Um workflow opera sobre uma **lista de itens** que flui por uma sequência de primitivos. Cada primitivo recebe a lista, faz algo com ela, e passa o resultado para o próximo.
 
 ```
-[emails] → exec → set → filter → distinct → exec → set → branch → [sent]
+[emails] → call → tap → pipe → distinct → filter → once → pipe → pipe → set → branch → [sent]
 ```
 
-Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/filter` em JavaScript ou pipes em Unix. Quando a lista de itens fica vazia em qualquer ponto do fluxo — por um `filter` sem resultados, por uma fonte sem dados, ou por erros que descartaram todos os itens — o workflow encerra naturalmente, sem erro. Não existe um primitivo especial para isso; é o comportamento padrão do runtime.
+Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/filter` em JavaScript ou pipes em Unix. Quando a lista de itens fica vazia em qualquer ponto do fluxo atualmente suportado — por um `filter` sem resultados ou por uma fonte sem dados — o workflow encerra naturalmente com status `"empty"`. Não existe primitivo especial para isso; é o comportamento padrão do runtime.
 
 ### Primitivos da DSL
 
-A DSL oferece um vocabulário pequeno e ortogonal. Cada primitivo tem um contrato único e não se sobrepõe a nenhum outro:
+Todos os primitivos usam **sintaxe de table** — `primitivo { chave = valor }`. Não existe mistura de estilos: tudo é uma table com chaves nomeadas, o que torna o código uniforme independentemente do primitivo.
 
-| Primitivo  | O que faz                                                                       | Muta o item?            |
-| ---------- | ------------------------------------------------------------------------------- | ----------------------- |
-| `exec`     | Executa um callable (plugin); o resultado fica disponível no próximo `set`      | Não                     |
-| `tap`      | Efeito colateral puro; resultado é descartado                                   | Nunca                   |
-| `set`      | Lê `res` (output do `exec` anterior), `item` e `ctx`; retorna o item atualizado | Sim                     |
-| `filter`   | Remove itens onde a condição retorna falso                                      | Não                     |
-| `distinct` | Remove duplicatas por chave                                                     | Não                     |
-| `branch`   | Roteia para sub-pipeline baseado em condição                                    | Condicional             |
-| `once`     | Executa um callable uma única vez para todo o lote; salva no contexto           | Não                     |
-| `parallel` | Executa sub-pipelines concorrentemente e converge                               | Depende do sub-pipeline |
+| Primitivo  | Contrato                                                                                                                        | Muta o item?   |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `call`     | Cria a lista de itens a partir de uma fonte externa. `on_data(result)` retorna a forma inicial do item.                         | — (cria itens) |
+| `tap`      | Efeito colateral puro. O callable recebe o item diretamente; o resultado é descartado.                                          | Nunca          |
+| `set`      | Transformação Lua pura, sem chamada externa. `to(item)` calcula valores derivados e retorna o item.                             | Sim            |
+| `filter`   | Remove itens onde `condition(item)` retorna falso.                                                                              | Não            |
 
-### O primitivo `set`
+Primitivos como `pipe`, `distinct`, `once`, `branch` e `parallel` seguem no roadmap e ainda não foram implementados no runtime desta fase.
 
-`set` é o primitivo central de transformação. Ele substitui o que outras ferramentas chamam de `map`, `transform` e `merge` — funções diferentes com a mesma intenção. A assinatura unificada deixa explícito o que está acontecendo em qualquer situação:
+### A separação entre `call`, `pipe` e `set`
+
+Estes três primitivos cobrem todos os casos de transformação e têm contratos intencionalmente distintos. Em todos eles, o callable recebe o `item` diretamente — não existe `select` no primitivo. Cada callable declara em sua própria config como quer usar o item (via `query`, `message`, `select` ou qualquer campo que o plugin definir).
+
+**`call`** é o primitivo de _fonte_. Cria a lista de itens do zero. `on_data` recebe o resultado bruto da fonte e retorna a forma inicial do item — não existe `item` anterior porque este é o primeiro step.
 
 ```lua
-set(function(res, item, ctx)
-  -- res: output do callable executado pelo exec imediatamente anterior
-  --      nil se não houve exec antes deste set
-  -- item: estado atual do item na pipeline
-  -- ctx: contexto global do workflow (compartilhado entre todos os items)
-
-  item.campo = res.valor
-  return item
-end)
+call {
+  exec    = lumn.plugins.outlook.message.list { folder = "Inbox", unread = true },
+  on_data = function(result)
+    return {
+      email_id    = result.id,
+      received_at = result.received_datetime,
+      email_body  = result.body.content,
+    }
+  end,
+}
 ```
 
-**Após um `exec`:** `res` contém o retorno do callable. É onde você extrai os dados da resposta de uma API e popula campos do item.
+**`tap`** é o primitivo de _efeito colateral_. O callable recebe o item e age sobre ele (mover um arquivo, disparar um evento, logar). O resultado é sempre descartado; o item passa inalterado.
 
-**Sem `exec` anterior:** `res` é `nil`. Você usa `set` apenas com `item` e `ctx` para calcular valores derivados, formatar strings, ou qualquer transformação puramente local.
+```lua
+tap {
+  exec = lumn.plugins.outlook.message.move {
+    folder = "Processando",
+    select = function(item) return item.email_id end,  -- config interna do callable
+  },
+},
+```
 
-**Com acesso ao contexto:** `ctx` está sempre disponível. Você pode ler o access token OAuth em `ctx.access_token`, ou qualquer outro valor salvo por `once`.
+**`pipe`** é o primitivo de _transformação com I/O externo_. O callable recebe o item via sua própria config — `query`, `message`, `path` ou o que o plugin definir. `on_data` mergeia o resultado de volta no item.
+
+```lua
+pipe {
+  exec    = agent_extract {
+    message = function(item) return item.email_body end,  -- config interna do callable
+  },
+  on_data = function(item, result)
+    item.pedido_id  = result.pedidoId
+    item.client_cpf = result.cpf
+    return item
+  end,
+}
+```
+
+**`set`** é o primitivo de _transformação pura_. Sem callable externo — apenas Lua. Usa `lumn.get` para acessar estado global quando necessário.
+
+```lua
+set {
+  to = function(item)
+    local days = (item.client_level == "diamond") and 14 or 7
+    item.is_within_period = lumn.date.now() <= lumn.date.add(item.order_date, days)
+    item.grace_days       = days
+    return item
+  end,
+}
+```
 
 ### Estado por item vs. estado global
 
 Uma distinção central no modelo é a separação entre dois tipos de estado:
 
-**`item`** é o objeto que carrega os dados de um elemento específico da pipeline — um e-mail, um pedido, um registro. Cada item tem sua própria cópia independente. Mutações em um item nunca afetam outros.
+**`item`** é o objeto que carrega os dados de um elemento específico da pipeline — um e-mail, um pedido, um registro. Cada item tem sua própria cópia independente e é passado como argumento dos callbacks. Mutações em um item nunca afetam outros.
 
-**`ctx`** (context) é o estado compartilhado entre todos os items de uma execução, e acessível diretamente como terceiro argumento de `set`. O access token OAuth é o exemplo canônico: obtido uma única vez via `once`, disponível para todos os items subsequentes.
+**Estado global** é compartilhado entre todos os items de uma execução e gerenciado através de duas funções do runtime:
+
+- `lumn.set("chave", valor)` — grava um valor no estado global do workflow
+- `lumn.get("chave")` — lê um valor do estado global
+
+Nenhum callback recebe o contexto como argumento. O acesso ao estado global é sempre explícito, via `lumn.get` e `lumn.set`, o que torna imediatamente visível no código quando uma função depende de estado compartilhado — sem necessidade de inspecionar a assinatura da função.
+
+O access token OAuth é o exemplo canônico: gravado uma única vez pelo `once`, lido por todos os `pipe` e `set` subsequentes.
+
+```lua
+-- once grava no estado global via lumn.set
+once {
+  exec    = get_access_token,
+  on_data = function(result)
+    lumn.set("access_token", result.data.access_token)
+  end,
+}
+
+-- pipe: o callable recebe o item via sua própria config
+-- lumn.auth.bearer resolve lumn.get("access_token") internamente
+pipe {
+  exec = sap.get {
+    path  = "/Customer/CustomerList",
+    auth  = lumn.auth.bearer("access_token"),
+    query = function(item)
+      return { ["$filter"] = "CPF eq '" .. item.client_cpf .. "'" }
+    end,
+  },
+  on_data = function(item, result)
+    item.client_level = result.data.customerLevel
+    return item
+  end,
+}
+
+-- set lê o estado global diretamente quando necessário
+set {
+  to = function(item)
+    local tenant = lumn.get("tenant_id")   -- leitura explícita de estado global
+    item.url = "https://" .. tenant .. ".api.com/orders/" .. item.order_id
+    return item
+  end,
+}
+```
+
+### Variáveis de ambiente
+
+Variáveis de ambiente e secrets são acessados via `lumn.env` e `lumn.secret` — nunca via `os.getenv` ou qualquer outra função do sistema que o sandbox bloqueia:
+
+```lua
+-- Variável de ambiente (string, lida do .env ou do ambiente do processo)
+lumn.env("SAP_BASE_URL")
+
+-- Secret (lido do vault criptografado; valor nunca aparece em logs)
+lumn.secret("SAP_CLIENT_SECRET")
+```
+
+A distinção entre `lumn.env` e `lumn.secret` é intencional: `env` é para configuração não-sensível que pode aparecer em logs e no output de `lumn status`; `secret` é para credenciais que o engine garante nunca serializar.
 
 ### Exemplo comentado
 
-O workflow abaixo processa cancelamentos de pedidos recebidos por e-mail. Ele serve como referência de como os primitivos se combinam em algo concreto:
+O workflow completo de cancelamento de pedidos mostra todos os primitivos em contexto real:
 
 ```lua
 -- order_cancel/init.lua
 
 -- ── Declaração de componentes ───────────────────────────────────────────────
--- Instâncias de plugins configuradas uma vez e reutilizadas no flow.
--- Acessadas via global lumn — não via require.
+-- Plugins acessados via lumn.plugins.*
+-- Utilitários nativos do runtime acessados via lumn.http, lumn.ai, etc.
 
-local outlook = lumn.outlook.client {
-  key = "outlook.cancelamentos",   -- referência ao credential store
+local outlook = lumn.plugins.outlook {
+  key = "outlook.cancelamentos",
 }
 
 local agent_extract = lumn.ai.agent {
-  system_message = "Extraia os dados do formulário. Retorne somente JSON.",
+  system_message = [[
+    Extraia os dados do formulário de cancelamento.
+    Retorne SOMENTE JSON válido, sem markdown.
+  ]],
   model = lumn.ai.model.azure_openai {
-    name = "gpt-4o",
-    key  = "azure.openai",
+    model_name = "gpt-4o",
+    key        = "azure.openai",
   },
-  output_schema = {
-    pedidoId = { type = "string",  required = true  },
-    cpf      = { type = "cpf",     required = true  },
-    email    = { type = "email",   required = false },
+  output_parser = lumn.ai.structured_parser {
+    fields = {
+      { name = "pedidoId", type = "string", required = true  },
+      { name = "cpf",      type = "cpf",    required = true  },
+      { name = "name",     type = "string", required = false },
+      { name = "email",    type = "email",  required = false },
+      { name = "phone",    type = "string", required = false },
+      { name = "reason",   type = "string", required = false },
+    },
+    on_invalid = "skip",
   },
-  on_invalid = "skip",
+}
+
+local get_access_token = lumn.http.post {
+  url          = "https://login.microsoftonline.com/token",
+  content_type = "application/x-www-form-urlencoded",
+  data = {
+    grant_type    = "client_credentials",
+    resource      = lumn.env("SAP_RESOURCE"),
+    client_id     = lumn.env("SAP_CLIENT_ID"),
+    client_secret = lumn.secret("SAP_CLIENT_SECRET"),
+  },
 }
 
 local sap = lumn.http.client {
   base_url = lumn.env("SAP_BASE_URL"),
-  headers  = { ["Ocp-Apim-Subscription-Key"] = lumn.env("OCP_KEY") },
-}
-
-local get_token = lumn.http.post {
-  url  = "https://login.microsoftonline.com/token",
-  body = {
-    client_id     = lumn.env("SAP_CLIENT_ID"),
-    client_secret = lumn.secret("SAP_CLIENT_SECRET"),
-    grant_type    = "client_credentials",
+  headers  = {
+    ["Ocp-Apim-Subscription-Key"] = lumn.env("OCP_KEY"),
   },
 }
 
-local send_mail = lumn.sendgrid.mail {
+local send_mail = lumn.plugins.sendgrid.send {
   sender_email = "no-reply@bemoldigital.com.br",
   sender_name  = "Bemol Digital",
+  subject      = "Sua solicitação de cancelamento",
+  mime_type    = lumn.plugins.sendgrid.html_mime_type,
 }
 
 -- ── Definição do workflow ────────────────────────────────────────────────────
@@ -291,105 +426,151 @@ return {
     lumn.triggers.scheduler { interval = "15m" },
   },
 
-  context = {
-    access_token = nil,
-  },
-
   flow = {
 
-    -- 1. Busca todos os e-mails não lidos
-    exec(outlook.message.list { folder = "Inbox", unread = true }),
-
-    -- 2. Extrai campos do e-mail para o item
-    -- res = lista de e-mails retornada pelo exec acima
-    set(function(res, item, ctx)
-      item.email_id    = res.id
-      item.received_at = res.received_datetime
-      item.email_body  = res.body.content
-      return item
-    end),
-
-    -- 3. Arquiva o e-mail na pasta Processando (efeito colateral, item não muda)
-    tap(outlook.message.move {
-      folder = "Processando",
-      select = function(item) return item.email_id end,
-    }),
-
-    -- 4. Extrai dados estruturados do HTML via IA
-    exec(agent_extract, {
-      select = function(item) return item.email_body end,
-    }),
-
-    -- 5. Popula o item com os dados extraídos
-    set(function(res, item, ctx)
-      item.pedido_id  = res.pedidoId
-      item.client_cpf = res.cpf
-      item.client_email = res.email
-      return item
-    end),
-
-    -- 6. Remove duplicatas do mesmo lote (mesmo pedido em dois e-mails)
-    distinct(function(item) return item.pedido_id end),
-
-    -- 7. Descarta itens sem CPF válido
-    -- Se não sobrar nenhum item, o workflow encerra naturalmente aqui
-    filter(function(item)
-      return item.client_cpf ~= nil and #item.client_cpf == 11
-    end),
-
-    -- 8. Obtém token OAuth — uma única vez para todos os itens
-    once(get_token, {
-      into   = "access_token",
-      select = function(res) return res.access_token end,
-    }),
-
-    -- 9. Consulta nível do cliente na API SAP
-    exec(sap.get {
-      path  = "/Customer/CustomerList",
-      auth  = lumn.bearer("access_token"),
-      query = function(item)
-        return { ["$filter"] = "CPF eq '" .. item.client_cpf .. "'" }
+    -- 1. Busca e-mails não lidos e cria a lista de itens
+    call {
+      exec    = outlook.message.list { folder = "Inbox", unread = true },
+      on_data = function(result)
+        return {
+          email_id    = result.id,
+          received_at = result.received_datetime,
+          email_body  = result.body.content,
+        }
       end,
-    }),
+    },
 
-    -- 10. Popula nível do cliente
-    set(function(res, item, ctx)
-      item.client_id    = res.customerId
-      item.client_level = res.customerLevel
-      return item
-    end),
+    -- 2. Arquiva o e-mail (efeito colateral; item não muda)
+    -- select é config interna do callable, não do primitivo tap
+    tap {
+      exec = outlook.message.move {
+        folder = "Processando",
+        select = function(item) return item.email_id end,
+      },
+    },
 
-    -- 11. Calcula se o pedido está dentro do prazo de cancelamento
-    set(function(res, item, ctx)
-      local days = (item.client_level == "diamond") and 14 or 7
-      item.is_within_period = lumn.date.now() <= lumn.date.add(item.order_date, days)
-      item.deadline_days    = days
-      return item
-    end),
+    -- 3. Extrai dados estruturados via IA
+    -- message é config interna do agent_extract, não do primitivo pipe
+    pipe {
+      exec    = agent_extract {
+        message = function(item) return item.email_body end,
+      },
+      on_data = function(item, result)
+        item.pedido_id    = result.pedidoId
+        item.client_name  = result.name
+        item.client_cpf   = result.cpf
+        item.client_email = result.email
+        return item
+      end,
+    },
 
-    -- 12. Envia e-mail de acordo com o prazo
+    -- 4. Remove duplicatas do mesmo lote
+    distinct { by = function(item) return item.pedido_id end },
+
+    -- 5. Descarta itens inválidos
+    filter {
+      condition = function(item)
+        return item.client_cpf ~= nil
+           and #item.client_cpf == 11
+           and item.pedido_id   ~= nil
+      end,
+    },
+
+    -- 6. Obtém token OAuth — uma vez para todo o lote
+    once {
+      exec    = get_access_token,
+      on_data = function(result)
+        lumn.set("access_token", result.data.access_token)
+      end,
+    },
+
+    -- 7. Consulta nível do cliente
+    -- query é config interna do callable sap.get
+    pipe {
+      exec    = sap.get {
+        path  = "/Customer/CustomerList",
+        auth  = lumn.auth.bearer("access_token"),
+        query = function(item)
+          return {
+            ["$filter"] = "CPF eq '" .. item.client_cpf .. "'",
+            ["$expand"] = "Level",
+          }
+        end,
+      },
+      on_data = function(item, result)
+        item.client_id    = result.data.customerId
+        item.client_name  = result.data.customerName
+        item.client_level = result.data.customerLevel
+        return item
+      end,
+    },
+
+    -- 8. Consulta pedido e nota fiscal
+    pipe {
+      exec    = sap.get {
+        path  = "/order/Order",
+        auth  = lumn.auth.bearer("access_token"),
+        query = function(item)
+          return {
+            ["$filter"] = "Customer eq '" .. item.client_id .. "'",
+            ["$expand"] = "NotaFiscalDetails",
+          }
+        end,
+      },
+      on_data = function(item, result)
+        item.order_number = result.data.OriginOrderNumber
+        item.order_date   = result.data.OrderDate
+        item.order_type   = (result.data.StoreID == "102") and "ONLINE" or "FISICO"
+        return item
+      end,
+    },
+
+    -- 9. Calcula prazo — lógica pura, sem I/O
+    set {
+      to = function(item)
+        local days = (item.client_level == "diamond") and 14 or 7
+        item.is_within_period = lumn.date.now() <= lumn.date.add(item.order_date, days)
+        item.grace_days       = days
+        return item
+      end,
+    },
+
+    -- 10. Envia e-mail conforme prazo
     branch {
       condition = function(item) return item.is_within_period end,
 
-      on_true = tap(send_mail {
-        to       = function(item) return item.client_email end,
-        template = "order_cancel/templates/aprovado.html",
-        data     = function(item) return { nome = item.client_name, pedido = item.pedido_id } end,
-      }),
+      on_true = tap {
+        exec = send_mail {
+          to   = function(item) return item.client_email end,
+          body = function(item)
+            return table.concat({
+              "nome    = " .. item.client_name,
+              "pedido  = " .. item.order_number,
+              "prazo   = " .. item.grace_days .. " dias",
+            }, "\n")
+          end,
+        },
+      },
 
-      on_false = tap(send_mail {
-        to       = function(item) return item.client_email end,
-        template = "order_cancel/templates/negado.html",
-        data     = function(item) return { nome = item.client_name, prazo = item.deadline_days } end,
-      }),
+      on_false = tap {
+        exec = send_mail {
+          to   = function(item) return item.client_email end,
+          body = function(item)
+            return table.concat({
+              "nome   = " .. item.client_name,
+              "pedido = " .. item.order_number,
+            }, "\n")
+          end,
+        },
+      },
     },
 
   },
 
   on_error = {
-    default       = "skip_item",
-    agent_extract = "manual_review",
-    get_token     = "fail",
+    default          = "skip_item",
+    agent_extract    = "manual_review",
+    get_access_token = "fail",
   },
 }
 ```
@@ -456,21 +637,19 @@ Esse modelo tem três consequências importantes:
 
 ### Biblioteca padrão
 
-O lumn vem com uma biblioteca padrão de plugins mantida pela equipe principal:
+O lumn vem com uma biblioteca padrão de plugins mantida pela equipe principal. Plugins instalados são acessados via `lumn.plugins.<nome>`; utilitários nativos do runtime (`lumn.http`, `lumn.ai`) não requerem instalação:
 
-| Plugin              | Descrição                                         | Credential command                 |
-| ------------------- | ------------------------------------------------- | ---------------------------------- |
-| `lumn/http`         | Cliente HTTP genérico com auth, retry e paginação | —                                  |
-| `lumn/smtp`         | Envio de e-mail via SMTP                          | `lumn credential add smtp`         |
-| `lumn/sendgrid`     | Envio via SendGrid API                            | `lumn credential add sendgrid`     |
-| `lumn/outlook`      | E-mails via Microsoft Graph API                   | `lumn credential add outlook`      |
-| `lumn/gdrive`       | Arquivos via Google Drive API                     | `lumn credential add gdrive`       |
-| `lumn/slack`        | Mensagens para canais Slack                       | `lumn credential add slack`        |
-| `lumn/aws-s3`       | Objetos no Amazon S3                              | `lumn credential add aws`          |
-| `lumn/openai`       | Modelos GPT via OpenAI API                        | `lumn credential add openai`       |
-| `lumn/azure-openai` | GPT via Azure OpenAI Service                      | `lumn credential add azure-openai` |
-| `lumn/ai`           | Primitivos de IA: agent, schema, model            | —                                  |
-| `lumn/data`         | Acesso às Data Tables integradas                  | —                                  |
+| Plugin          | Namespace               | Descrição                                             | Credential command                            |
+| --------------- | ----------------------- | ----------------------------------------------------- | --------------------------------------------- |
+| nativo          | `lumn.http.*`           | Cliente HTTP, POST, auth — embutido no runtime        | —                                             |
+| nativo          | `lumn.ai.*`             | Agent, model, structured_parser — embutido no runtime | `lumn credential add openai` / `azure-openai` |
+| `lumn/outlook`  | `lumn.plugins.outlook`  | E-mails via Microsoft Graph API                       | `lumn credential add outlook`                 |
+| `lumn/gdrive`   | `lumn.plugins.gdrive`   | Arquivos via Google Drive API                         | `lumn credential add gdrive`                  |
+| `lumn/sendgrid` | `lumn.plugins.sendgrid` | Envio de e-mail via SendGrid                          | `lumn credential add sendgrid`                |
+| `lumn/smtp`     | `lumn.plugins.smtp`     | Envio via SMTP genérico                               | `lumn credential add smtp`                    |
+| `lumn/slack`    | `lumn.plugins.slack`    | Mensagens para canais Slack                           | `lumn credential add slack`                   |
+| `lumn/aws-s3`   | `lumn.plugins.aws.s3`   | Objetos no Amazon S3                                  | `lumn credential add aws`                     |
+| `lumn/data`     | `lumn.plugins.data`     | Acesso às Data Tables integradas                      | —                                             |
 
 ### Criando um plugin
 
@@ -948,6 +1127,8 @@ Um endpoint `/health` retorna o status de saúde do daemon e de cada workflow re
 
 O engine converte o `flow` de um `init.lua` em um **DAG (grafo acíclico dirigido)** de nodes. O executor percorre esse DAG em ordem topológica, respeitando dependências declaradas.
 
+Cada node corresponde a um primitivo da DSL: `call`, `tap`, `pipe`, `set`, `filter`, `distinct`, `once`, `branch` e `parallel`. O `call` é sempre o node raiz — é o único primitivo que cria a lista de itens; todos os outros a consomem e transformam.
+
 Quando a lista de itens fica vazia em qualquer ponto do fluxo — por um `filter` sem resultados, por uma fonte sem dados, ou por erros que ativaram `skip_item` em todos os itens — o workflow encerra com status `"empty"`. Nenhum step posterior é executado. Esse comportamento é automático e não requer primitivo especial.
 
 O paralelismo é gerenciado por um worker pool de goroutines. Sub-pipelines dentro de `parallel {}` são submetidas ao pool e executadas concorrentemente; o executor aguarda todas antes de continuar para o próximo node.
@@ -962,7 +1143,7 @@ Em vez de expor globals individuais por primitive, o lumn registra um único obj
 - Funções utilitárias (`lumn.env`, `lumn.secret`, `lumn.bearer`, `lumn.date.*`)
 - Namespaces de plugins carregados dinamicamente a partir do `lumn.lock`
 
-Quando o engine carrega um `init.lua`, ele primeiro resolve todos os plugins declarados no projeto, registra seus callables sob `lumn.<plugin>.*`, e só então executa o arquivo. Isso garante que qualquer referência a `lumn.outlook.client` ou `lumn.ai.agent` esteja disponível no momento em que o arquivo é avaliado.
+Quando o engine carrega um `init.lua`, ele primeiro resolve todos os plugins declarados no projeto, registra seus callables sob `lumn.plugins.*`, e só então executa o arquivo. Isso garante que qualquer referência a `lumn.plugins.outlook` ou `lumn.ai.agent` esteja disponível no momento em que o arquivo é avaliado.
 
 ### Sandboxing da VM Lua
 
@@ -1055,7 +1236,7 @@ Web UI com DAG visualizer em tempo real via WebSocket, execution history complet
 
 Plugin registry baseado em Git com formato `usuario/plugin` e `usuario/path/plugin`, `lumn.lock` para reprodutibilidade, Plugin SDK completo com `CredentialSpec`, biblioteca padrão e sandboxing por subprocess gRPC.
 
-**Milestone:** `lumn plugin add pretodev/outlook` instala o plugin. `lumn credential add outlook` abre o browser para OAuth. `lumn.outlook.client {}` funciona no `init.lua` sem configuração adicional.
+**Milestone:** `lumn plugin add pretodev/outlook` instala o plugin. `lumn credential add outlook` abre o browser para OAuth. `lumn.plugins.outlook {}` funciona no `init.lua` sem configuração adicional.
 
 ### Phase 4 — MCP + AI (semanas 29–32)
 
