@@ -182,9 +182,6 @@ func FailureReport(workflow, version string, err error) Report {
 	}
 
 	var typed *errkind.Error
-	if typed != nil {
-		// unreachable; keep linter happy when no error.
-	}
 	if ok := errkind.As(err, &typed); ok {
 		report.Errors = append(report.Errors, ReportError{
 			Type:      typed.Type,
