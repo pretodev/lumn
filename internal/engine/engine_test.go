@@ -1,10 +1,14 @@
 package engine
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/pretodev/lumn/internal/executor"
 )
 
 func TestValidateAllowsLocalRequireStandalone(t *testing.T) {
@@ -177,5 +181,59 @@ return {
 	}
 	if report.Status != "empty" || report.ItemsIn != 0 || report.ItemsOut != 0 {
 		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestRunTargetWithOptionsExposesTriggerData(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "trigger-data")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatalf("mkdir workflow: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowDir, "init.lua"), []byte(`
+return {
+  id = "trigger-data",
+  version = "1.0.0",
+  flow = {
+    call {
+      exec = lumn.test_source({
+        { id = 1 },
+      }),
+      on_data = function(result)
+        return result
+      end,
+    },
+    tap {
+      exec = {
+        name = "print-trigger",
+        run = function(item)
+          local trigger = lumn.trigger_data()
+          print(trigger.type .. ":" .. trigger.path)
+        end
+      }
+    },
+  }
+}
+`), 0o644); err != nil {
+		t.Fatalf("write init: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	report, code := RunTargetWithOptions(workflowDir, &stderr, executor.RunOptions{
+		TriggerData: map[string]any{
+			"type": "webhook",
+			"path": "/hooks/test",
+		},
+	})
+	if code != 0 {
+		t.Fatalf("run code = %d, report = %+v, stderr = %q", code, report, stderr.String())
+	}
+	if report.Status != "ok" {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	if !strings.Contains(stderr.String(), "webhook:/hooks/test") {
+		t.Fatalf("expected trigger data on stderr, got %q", stderr.String())
 	}
 }

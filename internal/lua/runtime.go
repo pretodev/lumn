@@ -19,6 +19,8 @@ const (
 	registryPlaceholderMT   = "__lumn_placeholder_mt"
 	registryRefPrefix       = "__lumn_ref_"
 	kindField               = "__lumn_kind"
+	triggerKindField        = "__lumn_trigger_type"
+	triggerStateField       = "__lumn_trigger_data"
 	execField               = "exec"
 	onDataField             = "on_data"
 	toField                 = "to"
@@ -307,6 +309,29 @@ func (r *Runtime) TableKindRef(ref string) (string, bool) {
 	return r.TableStringFieldRef(ref, kindField)
 }
 
+func (r *Runtime) TriggerKindRef(ref string) (string, bool) {
+	return r.TableStringFieldRef(ref, triggerKindField)
+}
+
+func (r *Runtime) RefToGoValue(ref string) (any, error) {
+	r.PushRef(ref)
+	defer r.State.Pop(1)
+	return r.toGoValue(-1, map[interface{}]bool{})
+}
+
+func (r *Runtime) SetExecutionValue(stateRef, key string, value any) error {
+	if stateRef == "" {
+		return nil
+	}
+
+	r.PushRef(stateRef)
+	defer r.State.Pop(1)
+
+	r.pushGoValue(value)
+	r.State.SetField(-2, key)
+	return nil
+}
+
 func (r *Runtime) normalizeLoadError(err error) error {
 	msg := r.stackMessage(err)
 	switch {
@@ -458,6 +483,20 @@ func (r *Runtime) registerLumn() {
 	l.SetField(-2, "get")
 	l.PushGoFunction(lumnSet)
 	l.SetField(-2, "set")
+	l.PushGoFunction(lumnTriggerData)
+	l.SetField(-2, "trigger_data")
+
+	l.NewTable()
+	for name, fn := range map[string]golua.Function{
+		"scheduler":    triggerScheduler,
+		"webhook":      triggerWebhook,
+		"file_watcher": triggerFileWatcher,
+		"manual":       triggerManual,
+	} {
+		l.PushGoFunction(fn)
+		l.SetField(-2, name)
+	}
+	l.SetField(-2, "triggers")
 
 	l.SetGlobal("lumn")
 
@@ -647,6 +686,29 @@ func lumnSet(l *golua.State) int {
 	return 0
 }
 
+func lumnTriggerData(l *golua.State) int {
+	rt := runtimeFromState(l)
+	if !pushExecutionState(l) {
+		pushDefaultTriggerData(l)
+		return 1
+	}
+	l.Field(-1, triggerStateField)
+	if l.IsNoneOrNil(-1) {
+		l.Pop(2)
+		pushDefaultTriggerData(l)
+		return 1
+	}
+
+	value, err := rt.toGoValue(-1, map[interface{}]bool{})
+	l.Pop(2)
+	if err != nil {
+		return pushPrefixedError(l, runtimeErrorPrefix, err.Error())
+	}
+
+	rt.pushGoValue(value)
+	return 1
+}
+
 func primitiveCall(l *golua.State) int {
 	return primitiveNode(l, "call")
 }
@@ -672,6 +734,39 @@ func primitiveNode(l *golua.State, kind string) int {
 	l.PushString(kind)
 	l.SetField(-2, kindField)
 	return 1
+}
+
+func triggerScheduler(l *golua.State) int {
+	return triggerNode(l, "scheduler")
+}
+
+func triggerWebhook(l *golua.State) int {
+	return triggerNode(l, "webhook")
+}
+
+func triggerFileWatcher(l *golua.State) int {
+	return triggerNode(l, "file_watcher")
+}
+
+func triggerManual(l *golua.State) int {
+	return triggerNode(l, "manual")
+}
+
+func triggerNode(l *golua.State, kind string) int {
+	if l.IsTable(1) {
+		l.PushValue(1)
+	} else {
+		l.NewTable()
+	}
+	l.PushString(kind)
+	l.SetField(-2, triggerKindField)
+	return 1
+}
+
+func pushDefaultTriggerData(l *golua.State) {
+	l.NewTable()
+	l.PushString("none")
+	l.SetField(-2, "type")
 }
 
 func testSource(l *golua.State) int {
@@ -894,6 +989,13 @@ func (r *Runtime) pushGoValue(value any) {
 		for i, item := range v {
 			r.pushGoValue(item)
 			r.State.RawSetInt(-2, i+1)
+		}
+	case map[string]any:
+		r.State.NewTable()
+		for key, item := range v {
+			r.State.PushString(key)
+			r.pushGoValue(item)
+			r.State.RawSet(-3)
 		}
 	case map[any]any:
 		r.State.NewTable()
