@@ -96,8 +96,25 @@ func NewRuntime(workflowDir, workspaceDir string, stderr io.Writer) (*Runtime, e
 	return rt, nil
 }
 
-func (r *Runtime) Close() {}
+func (r *Runtime) Close() {
+	if r == nil || r.State == nil {
+		return
+	}
 
+	// Clear the runtime entry in the Lua registry to drop references from Lua to Go.
+	r.State.PushNil()
+	r.State.SetField(golua.RegistryIndex, registryRuntimeKey)
+
+	// Reset the stack to avoid keeping unnecessary values alive.
+	r.State.SetTop(0)
+
+	// Close the underlying Lua state to release all associated resources.
+	r.State.Close()
+
+	// Drop Go-side references to help GC and mark the runtime as closed.
+	r.State = nil
+	r.nextRef = 0
+}
 func (r *Runtime) LoadWorkflow(initPath string) (string, error) {
 	if err := golua.LoadFile(r.State, initPath, "t"); err != nil {
 		defer r.State.SetTop(0)
