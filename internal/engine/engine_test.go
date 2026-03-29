@@ -226,7 +226,7 @@ func TestRunTargetWithEmptySourceIsEmpty(t *testing.T) {
 return {
   flow = {
     call {
-      exec = lumn.test_source({}),
+      exec = lumn.from({}),
       on_data = function(result)
         return result
       end,
@@ -247,6 +247,303 @@ return {
 	}
 }
 
+func TestRunTargetWithEmptyFlowIsOK(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "empty-flow")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
+return {
+  flow = {}
+}
+`)
+
+	report, code := RunTarget(workflowDir, io.Discard)
+	if code != 0 {
+		t.Fatalf("run code = %d, report = %+v", code, report)
+	}
+	if report.Status != "ok" || report.ItemsIn != 0 || report.ItemsOut != 0 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestValidateAndRunTapOnlyWorkflow(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "tap-only")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    tap {
+      exec = {
+        name = "hello-world",
+        run = function(item)
+          if item ~= nil then
+            error("expected nil item")
+          end
+          print("hello world")
+        end
+      }
+    },
+  }
+}
+`)
+
+	if err := ValidateTarget(workflowDir, io.Discard); err != nil {
+		t.Fatalf("validate target: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	report, code := RunTarget(workflowDir, &stderr)
+	if code != 0 {
+		t.Fatalf("run code = %d, report = %+v, stderr = %q", code, report, stderr.String())
+	}
+	if report.Status != "empty" || report.ItemsIn != 0 || report.ItemsOut != 0 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	if !strings.Contains(stderr.String(), "hello world") {
+		t.Fatalf("expected tap output on stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunTargetCallWithoutOnDataUsesRawArrayItems(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "raw-array")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = lumn.from({
+        { id = 1, active = true },
+        { id = 2, active = false },
+      }),
+    },
+    filter {
+      condition = function(item)
+        return item.active
+      end,
+    },
+  }
+}
+`)
+
+	report, code := RunTarget(workflowDir, io.Discard)
+	if code != 0 {
+		t.Fatalf("run code = %d, report = %+v", code, report)
+	}
+	if report.Status != "ok" || report.ItemsIn != 2 || report.ItemsOut != 1 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestRunTargetCallWithoutOnDataAcceptsSingleObject(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "single-object")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = {
+        name = "single-object",
+        run = function()
+          return {
+            id = 7,
+            kind = "object",
+          }
+        end,
+      },
+    },
+    filter {
+      condition = function(item)
+        return item.id == 7 and item.kind == "object"
+      end,
+    },
+  }
+}
+`)
+
+	report, code := RunTarget(workflowDir, io.Discard)
+	if code != 0 {
+		t.Fatalf("run code = %d, report = %+v", code, report)
+	}
+	if report.Status != "ok" || report.ItemsIn != 1 || report.ItemsOut != 1 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestRunTargetCallWithoutOnDataAcceptsScalar(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "single-scalar")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = {
+        name = "single-scalar",
+        run = function()
+          return "hello"
+        end,
+      },
+    },
+    tap {
+      exec = {
+        name = "print-item",
+        run = function(item)
+          print("item:" .. item)
+        end,
+      },
+    },
+  }
+}
+`)
+
+	var stderr bytes.Buffer
+	report, code := RunTarget(workflowDir, &stderr)
+	if code != 0 {
+		t.Fatalf("run code = %d, report = %+v, stderr = %q", code, report, stderr.String())
+	}
+	if report.Status != "ok" || report.ItemsIn != 1 || report.ItemsOut != 1 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	if !strings.Contains(stderr.String(), "item:hello") {
+		t.Fatalf("expected scalar item on stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunTargetTapThenCallThenTapUsesEmptyStateSemantics(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "tap-call-tap")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    tap {
+      exec = {
+        name = "before-call",
+        run = function(item)
+          if item == nil then
+            print("before:nil")
+            return
+          end
+          error("expected nil item before call")
+        end,
+      },
+    },
+    call {
+      exec = lumn.from({
+        { id = 1 },
+        { id = 2 },
+      }),
+    },
+    tap {
+      exec = {
+        name = "after-call",
+        run = function(item)
+          print("after:" .. item.id)
+        end,
+      },
+    },
+  }
+}
+`)
+
+	var stderr bytes.Buffer
+	report, code := RunTarget(workflowDir, &stderr)
+	if code != 0 {
+		t.Fatalf("run code = %d, report = %+v, stderr = %q", code, report, stderr.String())
+	}
+	if report.Status != "ok" || report.ItemsIn != 2 || report.ItemsOut != 2 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	if !strings.Contains(stderr.String(), "before:nil") || !strings.Contains(stderr.String(), "after:1") || !strings.Contains(stderr.String(), "after:2") {
+		t.Fatalf("unexpected tap output: %q", stderr.String())
+	}
+}
+
+func TestRunTargetContinuesAfterEmptyBatchUntilNextCall(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "empty-then-call")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = lumn.from({}),
+    },
+    set {
+      to = function(item)
+        error("set should not run")
+      end,
+    },
+    filter {
+      condition = function(item)
+        error("filter should not run")
+      end,
+    },
+    call {
+      exec = lumn.from({
+        { id = 1 },
+      }),
+    },
+  }
+}
+`)
+
+	report, code := RunTarget(workflowDir, io.Discard)
+	if code != 0 {
+		t.Fatalf("run code = %d, report = %+v", code, report)
+	}
+	if report.Status != "ok" || report.ItemsIn != 1 || report.ItemsOut != 1 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestRunTargetUsesLastCallBatchForItemsIn(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "last-call-wins")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = lumn.from({
+        { id = 1 },
+      }),
+    },
+    call {
+      exec = lumn.from({
+        { id = 2 },
+        { id = 3 },
+      }),
+    },
+    filter {
+      condition = function(item)
+        return item.id == 3
+      end,
+    },
+  }
+}
+`)
+
+	report, code := RunTarget(workflowDir, io.Discard)
+	if code != 0 {
+		t.Fatalf("run code = %d, report = %+v", code, report)
+	}
+	if report.Status != "ok" || report.ItemsIn != 2 || report.ItemsOut != 1 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
 func TestRunTargetWithOptionsExposesTriggerData(t *testing.T) {
 	t.Parallel()
 
@@ -256,7 +553,7 @@ func TestRunTargetWithOptionsExposesTriggerData(t *testing.T) {
 return {
   flow = {
     call {
-      exec = lumn.test_source({
+      exec = lumn.from({
         { id = 1 },
       }),
       on_data = function(result)
@@ -310,7 +607,7 @@ return {
   version = "9.9.9",
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,

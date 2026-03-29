@@ -79,7 +79,7 @@ local log_item = {
 return {
   flow = {
     call {
-      exec = lumn.test_source(items),
+      exec = lumn.from(items),
       on_data = function(result)
         return result
       end,
@@ -192,22 +192,24 @@ Um callable e uma table Lua com este contrato:
 
 Primitivos suportados nesta fase:
 
-- `call { exec = callable, on_data = function(result) return item end }`
+- `call { exec = callable, on_data = function(result) return item end }` (`on_data` e opcional)
 - `set { to = function(item) return item end }`
 - `filter { condition = function(item) return boolean end }`
 - `tap { exec = callable }`
-- `lumn.test_source(items)`
+- `lumn.from(items)`
 - `lumn.get("chave")`
 - `lumn.set("chave", valor)`
 
 Semantica atual:
 
-- `call` e o unico primitivo que cria a lista inicial de itens
-- `call.exec` roda uma vez e `call.on_data` transforma cada resultado bruto em item
+- o flow sempre inicia com batch vazio
+- `call` pode aparecer em qualquer posicao e substitui o batch atual
+- `call.exec` roda uma vez; sem `on_data`, cada resultado bruto vira item diretamente
+- se `call.exec` retornar uma table-array pura, cada posicao vira um item; qualquer outro valor vira um unico item
 - `set.to` transforma o item atual
-- `filter.condition` decide se o item continua no batch
-- `tap.exec` recebe uma copia do item atual e seu retorno e descartado
-- quando o batch fica vazio durante a execucao, o workflow encerra com status `empty`
+- `filter.condition` decide se o item continua no batch; com batch vazio, o step e ignorado
+- `tap.exec` recebe uma copia do item atual e seu retorno e descartado; com batch vazio, roda uma vez com `nil`
+- ao final da execucao, flows nao vazios que terminam sem itens retornam status `empty`
 
 ## Workspace e `require`
 

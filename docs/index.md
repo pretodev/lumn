@@ -272,7 +272,9 @@ Um workflow opera sobre uma **lista de itens** que flui por uma sequência de pr
 [emails] → call → tap → pipe → distinct → filter → once → pipe → pipe → set → branch → [sent]
 ```
 
-Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/filter` em JavaScript ou pipes em Unix. Quando a lista de itens fica vazia em qualquer ponto do fluxo — por um `filter` sem resultados, por uma fonte sem dados, ou por erros que descartaram todos os itens — o workflow encerra naturalmente com status `"empty"`. Não existe primitivo especial para isso; é o comportamento padrão do runtime.
+Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/filter` em JavaScript ou pipes em Unix. No runtime atual, a execução sempre começa com lista vazia. Steps como `set` e `filter` são ignorados enquanto o batch estiver vazio, `tap` pode rodar uma vez com `nil`, e `call` pode aparecer em qualquer posição para substituir o estado atual. O status `"empty"` é decidido no fim da execução quando um flow não vazio termina sem itens.
+
+Hoje, a implementação cobre apenas `call`, `tap`, `set` e `filter`. `pipe`, `distinct`, `once`, `branch` e `parallel` permanecem como parte da visão da DSL, mas ainda não estão disponíveis no runtime.
 
 ### Primitivos da DSL
 
@@ -280,7 +282,7 @@ Todos os primitivos usam **sintaxe de table** — `primitivo { chave = valor }`.
 
 | Primitivo  | Contrato                                                                                                                        | Muta o item?   |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| `call`     | Cria a lista de itens a partir de uma fonte externa. `on_data(result)` retorna a forma inicial do item.                         | — (cria itens) |
+| `call`     | Substitui a lista de itens atual a partir de uma fonte externa. `on_data(result)` e opcional e transforma cada resultado bruto. | — (cria itens) |
 | `tap`      | Efeito colateral puro. O callable recebe o item diretamente; o resultado é descartado.                                          | Nunca          |
 | `pipe`     | Chama um callable por item e mergeia o resultado. `on_data(item, result)` retorna o item atualizado.                            | Sim            |
 | `set`      | Transformação Lua pura, sem chamada externa. `to(item)` calcula valores derivados e retorna o item.                             | Sim            |
@@ -294,7 +296,7 @@ Todos os primitivos usam **sintaxe de table** — `primitivo { chave = valor }`.
 
 Estes três primitivos cobrem todos os casos de transformação e têm contratos intencionalmente distintos. Em todos eles, o callable recebe o `item` diretamente — não existe `select` no primitivo. Cada callable declara em sua própria config como quer usar o item (via `query`, `message`, `select` ou qualquer campo que o plugin definir).
 
-**`call`** é o primitivo de _fonte_. Cria a lista de itens do zero. `on_data` recebe o resultado bruto da fonte e retorna a forma inicial do item — não existe `item` anterior porque este é o primeiro step.
+**`call`** é o primitivo de _fonte_. Ele substitui a lista de itens atual a partir do resultado retornado por `exec`. `on_data` é opcional; quando presente, transforma cada resultado bruto em item. Quando ausente, o resultado bruto vira item diretamente.
 
 ```lua
 call {
@@ -1304,9 +1306,9 @@ Um endpoint `/health` retorna o status de saúde do daemon e de cada workflow re
 
 O engine converte o `flow` do arquivo de workflow em um **DAG (grafo acíclico dirigido)** de nodes. O executor percorre esse DAG em ordem topológica, respeitando dependências declaradas.
 
-Cada node corresponde a um primitivo da DSL: `call`, `tap`, `pipe`, `set`, `filter`, `distinct`, `once`, `branch` e `parallel`. O `call` é sempre o node raiz — é o único primitivo que cria a lista de itens; todos os outros a consomem e transformam.
+No runtime atual, cada node corresponde a um dos primitivos implementados da DSL: `call`, `tap`, `set` e `filter`. O executor inicia com batch vazio, permite `call` em qualquer posição e trata `tap`/`set`/`filter` sobre estado vazio conforme a semântica descrita acima. `pipe`, `distinct`, `once`, `branch` e `parallel` continuam planejados, mas ainda não fazem parte do executor.
 
-Quando a lista de itens fica vazia em qualquer ponto do fluxo — por um `filter` sem resultados, por uma fonte sem dados, ou por erros que ativaram `skip_item` em todos os itens — o workflow encerra com status `"empty"`. Nenhum step posterior é executado. Esse comportamento é automático e não requer primitivo especial.
+Quando o batch fica vazio durante a execução, os steps posteriores continuam sendo avaliados. Isso permite, por exemplo, `tap` sem entrada inicial e `call` posteriores que repovoam o estado. O workflow só termina com status `"empty"` quando chega ao fim sem itens.
 
 O paralelismo é gerenciado por um worker pool de goroutines. Sub-pipelines dentro de `parallel {}` são submetidas ao pool e executadas concorrentemente; o executor aguarda todas antes de continuar para o próximo node.
 

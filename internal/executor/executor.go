@@ -61,44 +61,17 @@ func Run(workflow *dag.Workflow, opts RunOptions) (Report, error) {
 			if err != nil {
 				return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
 			}
-			if rt.RefType(sourceRef) != golua.TypeTable {
-				return report, &errkind.Error{
-					Code:      errkind.ErrRuntime,
-					Type:      errkind.TypeRuntime,
-					Message:   "call exec must return a table-array of results",
-					Primitive: string(node.Kind),
-					Position:  node.Position,
-					Callable:  node.CallableName,
-				}
+			newItems, err := buildCallItems(rt, node, sourceRef)
+			if err != nil {
+				return report, err
 			}
-			defer rt.DeleteRef(sourceRef)
-
-			sourceLen := rt.TableLen(sourceRef)
 			deleteItemRefs(rt, items)
-			items = make([]itemState, 0, sourceLen)
-			for i := 1; i <= sourceLen; i++ {
-				resultRef := rt.ArrayValueRef(sourceRef, i)
-				refs, err := rt.CallFunction(node.OnDataRef, 1, resultRef)
-				rt.DeleteRef(resultRef)
-				if err != nil {
-					deleteRefs(rt, refs...)
-					return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
-				}
-				if len(refs) != 1 || rt.RefType(refs[0]) == golua.TypeNil {
-					deleteRefs(rt, refs...)
-					return report, &errkind.Error{
-						Code:      errkind.ErrRuntime,
-						Type:      errkind.TypeRuntime,
-						Message:   "call on_data must return item, got nil",
-						Primitive: string(node.Kind),
-						Position:  node.Position,
-						Callable:  node.CallableName,
-					}
-				}
-				items = append(items, itemState{ItemRef: refs[0]})
-			}
+			items = newItems
 			report.ItemsIn = len(items)
 		case primitive.Set:
+			if len(items) == 0 {
+				continue
+			}
 			for i := range items {
 				refs, err := rt.CallFunction(node.FnRef, 1, items[i].ItemRef)
 				if err != nil {
@@ -119,6 +92,9 @@ func Run(workflow *dag.Workflow, opts RunOptions) (Report, error) {
 				items[i].ItemRef = refs[0]
 			}
 		case primitive.Filter:
+			if len(items) == 0 {
+				continue
+			}
 			filtered := make([]itemState, 0, len(items))
 			for i := range items {
 				refs, err := rt.CallFunction(node.FnRef, 1, items[i].ItemRef)
@@ -158,6 +134,14 @@ func Run(workflow *dag.Workflow, opts RunOptions) (Report, error) {
 			}
 			items = filtered
 		case primitive.Tap:
+			if len(items) == 0 {
+				resultRef, err := rt.CallCallable(node.CallableRef, "", stateRef)
+				if err != nil {
+					return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
+				}
+				rt.DeleteRef(resultRef)
+				continue
+			}
 			for i := range items {
 				clonedRef, err := rt.CloneRef(items[i].ItemRef)
 				if err != nil {
@@ -179,21 +163,63 @@ func Run(workflow *dag.Workflow, opts RunOptions) (Report, error) {
 				Position:  node.Position,
 			}
 		}
-
-		if len(items) == 0 {
-			report.Status = "empty"
-			report.ItemsOut = 0
-			return report, nil
-		}
-	}
-
-	if len(workflow.Nodes) == 0 {
-		report.ItemsOut = 0
-		return report, nil
 	}
 
 	report.ItemsOut = len(items)
+	if len(workflow.Nodes) > 0 && len(items) == 0 {
+		report.Status = "empty"
+	}
 	return report, nil
+}
+
+func buildCallItems(rt *luaenv.Runtime, node dag.Node, sourceRef string) ([]itemState, error) {
+	if rt.RefType(sourceRef) == golua.TypeTable && rt.RefIsPureArrayTable(sourceRef) {
+		defer rt.DeleteRef(sourceRef)
+
+		sourceLen := rt.TableLen(sourceRef)
+		items := make([]itemState, 0, sourceLen)
+		for i := 1; i <= sourceLen; i++ {
+			resultRef := rt.ArrayValueRef(sourceRef, i)
+			itemRef, err := callResultToItem(rt, node, resultRef)
+			if err != nil {
+				deleteItemRefs(rt, items)
+				return nil, err
+			}
+			items = append(items, itemState{ItemRef: itemRef})
+		}
+		return items, nil
+	}
+
+	itemRef, err := callResultToItem(rt, node, sourceRef)
+	if err != nil {
+		return nil, err
+	}
+	return []itemState{{ItemRef: itemRef}}, nil
+}
+
+func callResultToItem(rt *luaenv.Runtime, node dag.Node, resultRef string) (string, error) {
+	if node.OnDataRef == "" {
+		return resultRef, nil
+	}
+
+	refs, err := rt.CallFunction(node.OnDataRef, 1, resultRef)
+	rt.DeleteRef(resultRef)
+	if err != nil {
+		deleteRefs(rt, refs...)
+		return "", errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
+	}
+	if len(refs) != 1 || rt.RefType(refs[0]) == golua.TypeNil {
+		deleteRefs(rt, refs...)
+		return "", &errkind.Error{
+			Code:      errkind.ErrRuntime,
+			Type:      errkind.TypeRuntime,
+			Message:   "call on_data must return item, got nil",
+			Primitive: string(node.Kind),
+			Position:  node.Position,
+			Callable:  node.CallableName,
+		}
+	}
+	return refs[0], nil
 }
 
 func normalizeTriggerData(triggerData map[string]any) map[string]any {

@@ -233,6 +233,15 @@ func (r *Runtime) TableLen(ref string) int {
 	return r.State.RawLength(-1)
 }
 
+func (r *Runtime) RefIsPureArrayTable(ref string) bool {
+	r.PushRef(ref)
+	defer r.State.Pop(1)
+	if r.State.TypeOf(-1) != golua.TypeTable {
+		return false
+	}
+	return r.tableHasOnlyArrayKeys(r.State.AbsIndex(-1), r.State.RawLength(-1))
+}
+
 func (r *Runtime) ArrayValueRef(ref string, index int) string {
 	r.PushRef(ref)
 	defer r.State.Pop(1)
@@ -477,8 +486,8 @@ func (r *Runtime) registerLumn() {
 	l := r.State
 
 	l.NewTable()
-	l.PushGoFunction(testSource)
-	l.SetField(-2, "test_source")
+	l.PushGoFunction(fromValue)
+	l.SetField(-2, "from")
 	l.PushGoFunction(lumnGet)
 	l.SetField(-2, "get")
 	l.PushGoFunction(lumnSet)
@@ -769,23 +778,23 @@ func pushDefaultTriggerData(l *golua.State) {
 	l.SetField(-2, "type")
 }
 
-func testSource(l *golua.State) int {
-	if !l.IsTable(1) {
-		golua.ArgumentError(l, 1, "table expected")
-	}
-
+func fromValue(l *golua.State) int {
 	l.NewTable()
-	l.PushString("lumn.test_source")
+	l.PushString("lumn.from")
 	l.SetField(-2, nameField)
 	l.PushString("builtin source for tests and local development")
 	l.SetField(-2, descriptionField)
-	l.PushValue(1)
-	l.PushGoClosure(testSourceRun, 1)
+	if l.Top() == 0 {
+		l.PushNil()
+	} else {
+		l.PushValue(1)
+	}
+	l.PushGoClosure(fromValueRun, 1)
 	l.SetField(-2, runField)
 	return 1
 }
 
-func testSourceRun(l *golua.State) int {
+func fromValueRun(l *golua.State) int {
 	l.PushValue(golua.UpValueIndex(1))
 	return 1
 }

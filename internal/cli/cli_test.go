@@ -30,7 +30,7 @@ local log_item = {
 return {
   flow = {
     call {
-      exec = lumn.test_source(items),
+      exec = lumn.from(items),
       on_data = function(result)
         return result
       end,
@@ -83,7 +83,7 @@ func TestRunWithFolderResolutionPrefersInitOverLumn(t *testing.T) {
 return {
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 }, { id = 2 } }),
+      exec = lumn.from({ { id = 1 }, { id = 2 } }),
       on_data = function(result)
         return result
       end,
@@ -95,7 +95,7 @@ return {
 return {
   flow = {
     call {
-      exec = lumn.test_source({}),
+      exec = lumn.from({}),
       on_data = function(result)
         return result
       end,
@@ -123,7 +123,7 @@ func TestRunWithFolderFallsBackToLumn(t *testing.T) {
 return {
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -149,7 +149,7 @@ func TestRunFallsBackToLocalSelectorWhenDaemonIsUnavailable(t *testing.T) {
 return {
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -338,7 +338,7 @@ return {
   version = "9.9.9",
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -410,7 +410,7 @@ return {
 return {
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1, valor = 10 } }),
+      exec = lumn.from({ { id = 1, valor = 10 } }),
       on_data = function(result)
         return result
       end,

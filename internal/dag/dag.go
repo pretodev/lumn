@@ -73,32 +73,13 @@ func Build(rt *luaenv.Runtime, workflowRef string) (*Workflow, error) {
 			}
 		}
 
-		if position == 1 && node.Kind != primitive.Call {
-			return nil, &errkind.Error{
-				Code:      errkind.ErrStructure,
-				Type:      errkind.TypeStructure,
-				Message:   "non-empty flow must start with call",
-				Primitive: string(node.Kind),
-				Position:  position,
-			}
-		}
-		if position > 1 && node.Kind == primitive.Call {
-			return nil, &errkind.Error{
-				Code:      errkind.ErrStructure,
-				Type:      errkind.TypeStructure,
-				Message:   "call is only allowed as the first primitive in flow",
-				Primitive: string(node.Kind),
-				Position:  position,
-			}
-		}
-
 		switch node.Kind {
 		case primitive.Call:
 			if err := bindCallable(rt, &node, "exec"); err != nil {
 				return nil, err
 			}
 			onDataRef, ok := rt.TableRefFieldRef(nodeRef, "on_data")
-			if !ok || rt.RefType(onDataRef) != golua.TypeFunction {
+			if ok && rt.RefType(onDataRef) != golua.TypeFunction {
 				return nil, &errkind.Error{
 					Code:      errkind.ErrInvalidSignature,
 					Type:      errkind.TypeInvalidSignature,
@@ -107,7 +88,9 @@ func Build(rt *luaenv.Runtime, workflowRef string) (*Workflow, error) {
 					Position:  position,
 				}
 			}
-			node.OnDataRef = onDataRef
+			if ok {
+				node.OnDataRef = onDataRef
+			}
 		case primitive.Tap:
 			if err := bindCallable(rt, &node, "exec"); err != nil {
 				return nil, err

@@ -35,7 +35,7 @@ func TestDaemonHealthManualExecAndReactivate(t *testing.T) {
 return {
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -100,7 +100,7 @@ func TestDaemonStartReusesIDForSameNameVersion(t *testing.T) {
 return {
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -149,7 +149,7 @@ func TestDaemonSelectorsAcceptUniqueIDPrefixes(t *testing.T) {
 return {
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -190,7 +190,7 @@ func TestDaemonDeleteRemovesWorkflow(t *testing.T) {
 return {
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -224,7 +224,7 @@ func TestDaemonListIncludesNameVersionAndFails(t *testing.T) {
 return {
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -283,7 +283,7 @@ return {
   },
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -314,7 +314,7 @@ return {
   },
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -363,7 +363,7 @@ return {
   },
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -406,7 +406,7 @@ return {
   },
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
