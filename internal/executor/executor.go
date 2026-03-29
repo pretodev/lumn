@@ -38,10 +38,8 @@ type itemState struct {
 
 func Run(workflow *dag.Workflow, opts RunOptions) (Report, error) {
 	report := Report{
-		Workflow: workflow.ID,
-		Version:  workflow.Version,
-		Status:   "ok",
-		Errors:   []ReportError{},
+		Status: "ok",
+		Errors: []ReportError{},
 	}
 
 	rt := workflow.Runtime

@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -248,31 +250,57 @@ func (d *Daemon) retentionLoop() {
 	}
 }
 
-func (d *Daemon) StartWorkflow(path string) (store.Workflow, error) {
-	definition, target, err := engine.LoadDefinition(path, d.logger.Writer())
+func (d *Daemon) StartWorkflow(name, version, targetPath string) (store.Workflow, error) {
+	definition, target, err := engine.LoadDefinition(targetPath, d.logger.Writer())
 	if err != nil {
 		return store.Workflow{}, err
 	}
+	if name == "" {
+		name = target.Name
+	}
+	if version == "" {
+		version = "latest"
+	}
 
-	absPath := target.WorkflowDir
+	resolvedTarget := target.TargetPath
 	triggers, err := validateTriggers(definition.Triggers)
 	if err != nil {
 		return store.Workflow{}, err
 	}
 
-	existing, found, err := d.store.GetWorkflow(definition.ID)
+	existing, found, err := d.store.GetWorkflowByNameVersion(name, version)
 	if err != nil {
 		return store.Workflow{}, err
 	}
 	if found && existing.Status == store.StatusActive {
-		return store.Workflow{}, fmt.Errorf("workflow %q is already registered", definition.ID)
+		managed, err := d.getManagedWorkflowByID(existing.ID)
+		if err == nil {
+			managed.setAccepting(false)
+			if err := managed.waitIdle(d.config.ShutdownTimeout); err != nil {
+				managed.setAccepting(true)
+				managed.notify()
+				return store.Workflow{}, err
+			}
+			if err := d.finalizeWorkflowStop(managed, store.StatusStopped, "workflow restarted before queued execution ran"); err != nil {
+				return store.Workflow{}, err
+			}
+		} else {
+			if err := d.store.SetWorkflowStatus(existing.ID, store.StatusStopped); err != nil {
+				return store.Workflow{}, err
+			}
+		}
 	}
 
 	workflow := store.Workflow{
-		ID:      definition.ID,
-		Version: definition.Version,
-		Path:    absPath,
+		ID:      workflowIDFor(name, version),
+		Name:    name,
+		Version: version,
+		Path:    resolvedTarget,
 		Status:  store.StatusStopped,
+	}
+	if found {
+		workflow.ID = existing.ID
+		workflow.CreatedAt = existing.CreatedAt
 	}
 	if err := d.store.UpsertWorkflow(workflow); err != nil {
 		return store.Workflow{}, err
@@ -308,8 +336,16 @@ func (d *Daemon) StartWorkflow(path string) (store.Workflow, error) {
 	return activeWorkflow, nil
 }
 
-func (d *Daemon) StopWorkflow(workflowID string) error {
-	managed, err := d.getManagedWorkflow(workflowID)
+func (d *Daemon) StopWorkflow(selector string) error {
+	workflow, err := d.resolveWorkflow(selector)
+	if err != nil {
+		return err
+	}
+	if workflow.Status != store.StatusActive {
+		return nil
+	}
+
+	managed, err := d.getManagedWorkflowByID(workflow.ID)
 	if err != nil {
 		return err
 	}
@@ -324,25 +360,58 @@ func (d *Daemon) StopWorkflow(workflowID string) error {
 	return d.finalizeWorkflowStop(managed, store.StatusStopped, "workflow stopped before queued execution ran")
 }
 
-func (d *Daemon) RestartWorkflow(workflowID string) error {
-	managed, err := d.getManagedWorkflow(workflowID)
+func (d *Daemon) DeleteWorkflow(selector string) error {
+	workflow, err := d.resolveWorkflow(selector)
 	if err != nil {
 		return err
 	}
 
-	workflow := managed.workflow
-	managed.setAccepting(false)
-	if err := managed.waitIdle(d.config.ShutdownTimeout); err != nil {
-		managed.setAccepting(true)
-		managed.notify()
+	if workflow.Status == store.StatusActive {
+		managed, err := d.getManagedWorkflowByID(workflow.ID)
+		if err != nil {
+			return err
+		}
+
+		managed.setAccepting(false)
+		if err := managed.waitIdle(d.config.ShutdownTimeout); err != nil {
+			managed.setAccepting(true)
+			managed.notify()
+			return err
+		}
+
+		if err := d.finalizeWorkflowStop(managed, store.StatusStopped, "workflow deleted before queued execution ran"); err != nil {
+			return err
+		}
+	}
+
+	return d.store.DeleteWorkflow(workflow.ID)
+}
+
+func (d *Daemon) RestartWorkflow(selector string) error {
+	workflow, err := d.resolveWorkflow(selector)
+	if err != nil {
 		return err
 	}
 
-	if err := d.finalizeWorkflowStop(managed, store.StatusStopped, "workflow restarted before queued execution ran"); err != nil {
-		return err
+	if workflow.Status == store.StatusActive {
+		managed, err := d.getManagedWorkflowByID(workflow.ID)
+		if err != nil {
+			return err
+		}
+
+		managed.setAccepting(false)
+		if err := managed.waitIdle(d.config.ShutdownTimeout); err != nil {
+			managed.setAccepting(true)
+			managed.notify()
+			return err
+		}
+
+		if err := d.finalizeWorkflowStop(managed, store.StatusStopped, "workflow restarted before queued execution ran"); err != nil {
+			return err
+		}
 	}
 
-	if _, err := d.StartWorkflow(workflow.Path); err != nil {
+	if _, err := d.StartWorkflow(workflow.Name, workflow.Version, workflow.Path); err != nil {
 		return err
 	}
 	return nil
@@ -368,48 +437,58 @@ func (d *Daemon) ListWorkflowResponses() ([]workflowBundle, error) {
 		if found {
 			latest = &lastExecution
 		}
+		fails, err := d.store.CountFailedExecutionsSince(workflow.ID, workflow.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
 		bundles = append(bundles, workflowBundle{
 			Workflow: workflow,
 			Triggers: triggers,
 			Latest:   latest,
+			Fails:    fails,
 		})
 	}
 	return bundles, nil
 }
 
-func (d *Daemon) WorkflowDetails(workflowID string) (workflowBundle, error) {
-	workflow, found, err := d.store.GetWorkflow(workflowID)
+func (d *Daemon) WorkflowDetails(selector string) (workflowBundle, error) {
+	workflow, err := d.resolveWorkflow(selector)
 	if err != nil {
 		return workflowBundle{}, err
 	}
-	if !found {
-		return workflowBundle{}, fmt.Errorf("workflow %q not found", workflowID)
-	}
-	triggers, err := d.store.ListTriggers(workflowID)
+	triggers, err := d.store.ListTriggers(workflow.ID)
 	if err != nil {
 		return workflowBundle{}, err
 	}
-	lastExecution, found, err := d.store.LatestExecution(workflowID)
+	lastExecution, found, err := d.store.LatestExecution(workflow.ID)
 	if err != nil {
 		return workflowBundle{}, err
 	}
-	bundle := workflowBundle{Workflow: workflow, Triggers: triggers}
+	fails, err := d.store.CountFailedExecutionsSince(workflow.ID, workflow.UpdatedAt)
+	if err != nil {
+		return workflowBundle{}, err
+	}
+	bundle := workflowBundle{Workflow: workflow, Triggers: triggers, Fails: fails}
 	if found {
 		bundle.Latest = &lastExecution
 	}
 	return bundle, nil
 }
 
-func (d *Daemon) ExecWorkflow(workflowID string) (int64, executor.Report, error) {
-	managed, err := d.getManagedWorkflow(workflowID)
+func (d *Daemon) ExecWorkflow(selector string) (int64, executor.Report, error) {
+	workflow, err := d.resolveWorkflow(selector)
+	if err != nil {
+		return 0, executor.Report{}, err
+	}
+	managed, err := d.getManagedWorkflowByID(workflow.ID)
 	if err != nil {
 		return 0, executor.Report{}, err
 	}
 	if !managed.manual {
-		return 0, executor.Report{}, fmt.Errorf("workflow %q does not accept manual execution", workflowID)
+		return 0, executor.Report{}, fmt.Errorf("workflow %q does not accept manual execution", workflow.Name)
 	}
 
-	execution, err := d.enqueueExecution(workflowID, "manual", map[string]any{"type": "manual"})
+	execution, err := d.enqueueExecution(workflow.ID, "manual", map[string]any{"type": "manual"})
 	if err != nil {
 		return 0, executor.Report{}, err
 	}
@@ -505,10 +584,13 @@ func (d *Daemon) activateWorkflow(workflow store.Workflow, triggers []store.Trig
 	d.mu.Unlock()
 
 	if err := d.store.UpsertWorkflow(store.Workflow{
-		ID:      workflow.ID,
-		Version: workflow.Version,
-		Path:    workflow.Path,
-		Status:  store.StatusActive,
+		ID:        workflow.ID,
+		Name:      workflow.Name,
+		Version:   workflow.Version,
+		Path:      workflow.Path,
+		Status:    store.StatusActive,
+		CreatedAt: workflow.CreatedAt,
+		UpdatedAt: workflow.UpdatedAt,
 	}); err != nil {
 		return err
 	}
@@ -737,8 +819,10 @@ func (d *Daemon) workerLoop(managed *managedWorkflow) {
 			}
 
 			managed.setRunning(true)
-			report, _ := engine.RunTargetWithOptions(managed.workflow.Path, d.logger.Writer(), executor.RunOptions{
-				TriggerData: item.TriggerContext,
+			report, _ := engine.RunTargetWithOptions(managed.workflow.Path, d.logger.Writer(), engine.RunOptions{
+				WorkflowName: managed.workflow.Name,
+				Version:      managed.workflow.Version,
+				TriggerData:  item.TriggerContext,
 			})
 			if err := d.store.CompleteExecution(item.ExecutionID, report.Status, report); err != nil {
 				d.logger.Printf("complete execution %d failed: %v", item.ExecutionID, err)
@@ -749,7 +833,15 @@ func (d *Daemon) workerLoop(managed *managedWorkflow) {
 	}
 }
 
-func (d *Daemon) getManagedWorkflow(workflowID string) (*managedWorkflow, error) {
+func (d *Daemon) getManagedWorkflow(selector string) (*managedWorkflow, error) {
+	workflow, err := d.resolveWorkflow(selector)
+	if err != nil {
+		return nil, err
+	}
+	return d.getManagedWorkflowByID(workflow.ID)
+}
+
+func (d *Daemon) getManagedWorkflowByID(workflowID string) (*managedWorkflow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	managed, ok := d.workflows[workflowID]
@@ -782,6 +874,7 @@ type workflowBundle struct {
 	Workflow store.Workflow
 	Triggers []store.Trigger
 	Latest   *store.Execution
+	Fails    int
 }
 
 func (w *managedWorkflow) notify() {
@@ -824,6 +917,22 @@ func (w *managedWorkflow) waitIdle(timeout time.Duration) error {
 		time.Sleep(25 * time.Millisecond)
 	}
 	return fmt.Errorf("workflow %q did not finish execution before timeout", w.workflow.ID)
+}
+
+func (d *Daemon) resolveWorkflow(selector string) (store.Workflow, error) {
+	workflow, found, err := d.store.ResolveWorkflowSelector(selector)
+	if err != nil {
+		return store.Workflow{}, err
+	}
+	if !found {
+		return store.Workflow{}, fmt.Errorf("workflow %q not found", selector)
+	}
+	return workflow, nil
+}
+
+func workflowIDFor(name, version string) string {
+	sum := sha1.Sum([]byte(name + ":" + version))
+	return hex.EncodeToString(sum[:])[:8]
 }
 
 type schedulerPlan struct {

@@ -17,15 +17,19 @@ type HealthResponse struct {
 }
 
 type StartWorkflowRequest struct {
-	Path string `json:"path"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Target  string `json:"target"`
 }
 
 type WorkflowResponse struct {
 	ID         string   `json:"id"`
+	Name       string   `json:"name"`
 	Version    string   `json:"version"`
 	Path       string   `json:"path"`
 	Status     string   `json:"status"`
 	Triggers   []string `json:"triggers"`
+	Fails      int      `json:"fails"`
 	NextRun    string   `json:"next_run,omitempty"`
 	LastRun    string   `json:"last_run,omitempty"`
 	LastStatus string   `json:"last_status,omitempty"`

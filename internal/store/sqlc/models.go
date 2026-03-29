@@ -41,6 +41,7 @@ type Trigger struct {
 
 type Workflow struct {
 	ID        string
+	Name      string
 	Version   string
 	Path      string
 	Status    string

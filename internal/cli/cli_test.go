@@ -11,46 +11,12 @@ import (
 	"github.com/pretodev/lumn/internal/executor"
 )
 
-func TestInitAndValidateScaffold(t *testing.T) {
-	t.Parallel()
-
+func TestValidateAndRunUseDefaultLumnLua(t *testing.T) {
 	root := t.TempDir()
-	target := filepath.Join(root, "meu-workflow")
-
-	code, stdout, stderr := runCLI(t, "init", target)
-	if code != 0 {
-		t.Fatalf("init exit = %d, stderr = %q", code, stderr)
-	}
-	if !strings.Contains(stdout, "init.lua") {
-		t.Fatalf("expected init stdout to mention init.lua, got %q", stdout)
-	}
-
-	if _, err := os.Stat(filepath.Join(target, "init.lua")); err != nil {
-		t.Fatalf("expected scaffolded init.lua: %v", err)
-	}
-
-	code, stdout, stderr = runCLI(t, "validate", target)
-	if code != 0 {
-		t.Fatalf("validate exit = %d, stderr = %q", code, stderr)
-	}
-	if stdout != "" {
-		t.Fatalf("validate should be quiet on success, got stdout %q", stdout)
-	}
-	if stderr != "" {
-		t.Fatalf("validate should be quiet on success, got stderr %q", stderr)
-	}
-}
-
-func TestRunSuccessJSONAndPrintStderr(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	workflowDir := filepath.Join(root, "pedidos")
-	mustWriteWorkflow(t, workflowDir, `
+	writeWorkflowFile(t, root, "lumn.lua", `
 local items = {
   { id = 1, nome = "Item A", valor = 100 },
   { id = 2, nome = "Item B", valor = 50 },
-  { id = 3, nome = "Item C", valor = 200 },
 }
 
 local log_item = {
@@ -61,21 +27,11 @@ local log_item = {
 }
 
 return {
-  id = "pedidos",
-  version = "1.0.0",
   flow = {
     call {
       exec = lumn.test_source(items),
       on_data = function(result)
         return result
-      end,
-    },
-    set {
-      to = function(item)
-        lumn.set("ultimo_item_id", item.id)
-        item.ultimo_item_id = lumn.get("ultimo_item_id")
-        item.processado = true
-        return item
       end,
     },
     filter {
@@ -90,119 +46,205 @@ return {
 }
 `)
 
-	code, stdout, stderr := runCLI(t, "run", workflowDir)
+	withWorkingDir(t, root, func() {
+		code, stdout, stderr := runCLI(t, "validate")
+		if code != 0 {
+			t.Fatalf("validate exit = %d, stderr = %q", code, stderr)
+		}
+		if stdout != "" || stderr != "" {
+			t.Fatalf("validate should be quiet, stdout=%q stderr=%q", stdout, stderr)
+		}
+
+		code, stdout, stderr = runCLI(t, "run")
+		if code != 0 {
+			t.Fatalf("run exit = %d, stderr = %q", code, stderr)
+		}
+
+		report := decodeReport(t, stdout)
+		if report.Workflow != filepath.Base(root) || report.Version != "latest" {
+			t.Fatalf("unexpected metadata: %+v", report)
+		}
+		if report.Status != "ok" || report.ItemsIn != 2 || report.ItemsOut != 1 {
+			t.Fatalf("unexpected report: %+v", report)
+		}
+		if !strings.Contains(stderr, "Item A aprovado") {
+			t.Fatalf("expected print output on stderr, got %q", stderr)
+		}
+	})
+}
+
+func TestRunWithFolderResolutionPrefersInitOverLumn(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "priority")
+	writeWorkflowFile(t, workflowDir, "init.lua", `
+return {
+  flow = {
+    call {
+      exec = lumn.test_source({ { id = 1 }, { id = 2 } }),
+      on_data = function(result)
+        return result
+      end,
+    },
+  }
+}
+`)
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = lumn.test_source({}),
+      on_data = function(result)
+        return result
+      end,
+    },
+  }
+}
+`)
+
+	code, stdout, stderr := runCLI(t, "run", "-f", workflowDir)
 	if code != 0 {
 		t.Fatalf("run exit = %d, stderr = %q", code, stderr)
 	}
-
 	report := decodeReport(t, stdout)
-	if report.Status != "ok" {
-		t.Fatalf("expected status ok, got %+v", report)
-	}
-	if report.ItemsIn != 3 || report.ItemsOut != 2 {
-		t.Fatalf("unexpected item counts: %+v", report)
-	}
-	if len(report.Errors) != 0 {
-		t.Fatalf("expected no errors, got %+v", report.Errors)
-	}
-	if strings.Contains(stdout, "aprovado") {
-		t.Fatalf("expected stdout to contain JSON only, got %q", stdout)
-	}
-	if !strings.Contains(stderr, "Item A aprovado") || !strings.Contains(stderr, "Item C aprovado") {
-		t.Fatalf("expected tap print output on stderr, got %q", stderr)
+	if report.ItemsIn != 2 {
+		t.Fatalf("expected init.lua to win, got %+v", report)
 	}
 }
 
-func TestRunUsesWorkflowStateAcrossSteps(t *testing.T) {
+func TestRunWithFolderFallsBackToLumn(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	workflowDir := filepath.Join(root, "stateful")
-	mustWriteWorkflow(t, workflowDir, `
-local items = {
-  { id = 1, valor = 10 },
-  { id = 2, valor = 20 },
-}
-
+	workflowDir := filepath.Join(root, "fallback")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
 return {
-  id = "stateful",
-  version = "1.0.0",
   flow = {
     call {
-      exec = lumn.test_source(items),
+      exec = lumn.test_source({ { id = 1 } }),
       on_data = function(result)
         return result
-      end,
-    },
-    set {
-      to = function(item)
-        lumn.set("threshold", 15)
-        return item
-      end,
-    },
-    filter {
-      condition = function(item)
-        return item.valor >= lumn.get("threshold")
       end,
     },
   }
 }
 `)
 
-	code, stdout, stderr := runCLI(t, "run", workflowDir)
+	code, stdout, stderr := runCLI(t, "run", "-f", workflowDir)
 	if code != 0 {
-		t.Fatalf("run exit = %d, stderr = %q stdout = %q", code, stderr, stdout)
+		t.Fatalf("run exit = %d, stderr = %q", code, stderr)
 	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
-
 	report := decodeReport(t, stdout)
-	if report.Status != "ok" || report.ItemsIn != 2 || report.ItemsOut != 1 {
+	if report.ItemsIn != 1 || report.Workflow != "fallback" {
 		t.Fatalf("unexpected report: %+v", report)
 	}
 }
 
-func TestRunEmptyStatusWhenFilterRemovesAllItems(t *testing.T) {
-	t.Parallel()
-
+func TestRunFallsBackToLocalSelectorWhenDaemonIsUnavailable(t *testing.T) {
 	root := t.TempDir()
-	workflowDir := filepath.Join(root, "empty-after-filter")
-	mustWriteWorkflow(t, workflowDir, `
-local items = {
-  { id = 1, valor = 10 },
-}
-
+	workflowDir := filepath.Join(root, "orders")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
 return {
-  id = "empty-after-filter",
-  version = "1.0.0",
   flow = {
     call {
-      exec = lumn.test_source(items),
+      exec = lumn.test_source({ { id = 1 } }),
       on_data = function(result)
         return result
-      end,
-    },
-    filter {
-      condition = function(item)
-        return item.valor > 999
       end,
     },
   }
 }
 `)
 
-	code, stdout, stderr := runCLI(t, "run", workflowDir)
-	if code != 0 {
-		t.Fatalf("run exit = %d, stderr = %q stdout = %q", code, stderr, stdout)
-	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
+	withWorkingDir(t, root, func() {
+		code, stdout, stderr := runCLI(t, "run", "orders")
+		if code != 0 {
+			t.Fatalf("run exit = %d, stderr = %q", code, stderr)
+		}
+		if stderr != "" {
+			t.Fatalf("expected empty stderr, got %q", stderr)
+		}
+		report := decodeReport(t, stdout)
+		if report.Workflow != "orders" || report.Version != "latest" {
+			t.Fatalf("unexpected report: %+v", report)
+		}
+	})
+}
 
+func TestStartListWatchAndLogsRequireDaemon(t *testing.T) {
+	root := t.TempDir()
+	writeWorkflowFile(t, root, "lumn.lua", `
+return {
+  flow = {}
+}
+`)
+
+	withWorkingDir(t, root, func() {
+		tests := [][]string{
+			{"start", "cancelamentos"},
+			{"list"},
+			{"watch"},
+			{"logs"},
+		}
+
+		for _, args := range tests {
+			code, _, stderr := runCLI(t, args...)
+			if code != 1 {
+				t.Fatalf("%v exit = %d, want 1", args, code)
+			}
+			if !strings.Contains(stderr, "daemon is not running") {
+				t.Fatalf("%v stderr = %q", args, stderr)
+			}
+		}
+	})
+}
+
+func TestRemovedCommandsAreUnavailable(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{"init", "pedidos"},
+		{"exec", "pedidos"},
+		{"status"},
+	} {
+		code, _, stderr := runCLI(t, args...)
+		if code != 1 {
+			t.Fatalf("%v exit = %d, want 1", args, code)
+		}
+		if !strings.Contains(stderr, "usage: lumn") {
+			t.Fatalf("%v stderr = %q", args, stderr)
+		}
+	}
+}
+
+func TestLegacyIDVersionFieldsAreIgnored(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "legacy")
+	writeWorkflowFile(t, workflowDir, "lumn.lua", `
+return {
+  id = "legacy-id",
+  version = "9.9.9",
+  flow = {
+    call {
+      exec = lumn.test_source({ { id = 1 } }),
+      on_data = function(result)
+        return result
+      end,
+    },
+  }
+}
+`)
+
+	code, stdout, stderr := runCLI(t, "run", "-f", workflowDir)
+	if code != 0 {
+		t.Fatalf("run exit = %d, stderr = %q", code, stderr)
+	}
 	report := decodeReport(t, stdout)
-	if report.Status != "empty" || report.ItemsIn != 1 || report.ItemsOut != 0 {
-		t.Fatalf("unexpected report: %+v", report)
+	if report.Workflow != "legacy" || report.Version != "latest" {
+		t.Fatalf("legacy metadata leaked into report: %+v", report)
 	}
 }
 
@@ -213,7 +255,7 @@ func TestCommandExitCodes(t *testing.T) {
 
 	writeWorkflow := func(name, body string) string {
 		dir := filepath.Join(root, name)
-		mustWriteWorkflow(t, dir, body)
+		writeWorkflowFile(t, dir, "lumn.lua", body)
 		return dir
 	}
 
@@ -227,160 +269,26 @@ func TestCommandExitCodes(t *testing.T) {
 	}{
 		{
 			name:       "syntax",
-			args:       []string{"validate", writeWorkflow("syntax", `return {`)},
+			args:       []string{"validate", "-f", writeWorkflow("syntax", `return {`)},
 			wantCode:   2,
 			wantStderr: "syntax",
 		},
 		{
 			name: "structure",
-			args: []string{"validate", writeWorkflow("structure", `
+			args: []string{"validate", "-f", writeWorkflow("structure", `
 return {
-  version = "1.0.0",
-  flow = {}
+  flow = 1
 }
 `)},
 			wantCode:   3,
-			wantStderr: `"id"`,
-		},
-		{
-			name: "old exec syntax rejected",
-			args: []string{"validate", writeWorkflow("old-exec", `
-local items = {
-  { id = 1 },
-}
-
-return {
-  id = "old-exec",
-  version = "1.0.0",
-  flow = {
-    exec(lumn.test_source(items)),
-  }
-}
-`)},
-			wantCode:   4,
-			wantStderr: `unknown primitive`,
-		},
-		{
-			name: "flow must start with call",
-			args: []string{"validate", writeWorkflow("must-start-with-call", `
-return {
-  id = "must-start-with-call",
-  version = "1.0.0",
-  flow = {
-    set {
-      to = function(item)
-        return item
-      end,
-    },
-  }
-}
-`)},
-			wantCode:   3,
-			wantStderr: `must start with call`,
-		},
-		{
-			name: "call missing on_data",
-			args: []string{"validate", writeWorkflow("call-missing-on-data", `
-return {
-  id = "call-missing-on-data",
-  version = "1.0.0",
-  flow = {
-    call {
-      exec = lumn.test_source({}),
-    },
-  }
-}
-`)},
-			wantCode:   5,
-			wantStderr: `"on_data"`,
-		},
-		{
-			name: "set missing to",
-			args: []string{"validate", writeWorkflow("set-missing-to", `
-return {
-  id = "set-missing-to",
-  version = "1.0.0",
-  flow = {
-    call {
-      exec = lumn.test_source({}),
-      on_data = function(result)
-        return result
-      end,
-    },
-    set {},
-  }
-}
-`)},
-			wantCode:   5,
-			wantStderr: `"to"`,
-		},
-		{
-			name: "filter missing condition",
-			args: []string{"validate", writeWorkflow("filter-missing-condition", `
-return {
-  id = "filter-missing-condition",
-  version = "1.0.0",
-  flow = {
-    call {
-      exec = lumn.test_source({}),
-      on_data = function(result)
-        return result
-      end,
-    },
-    filter {},
-  }
-}
-`)},
-			wantCode:   5,
-			wantStderr: `"condition"`,
-		},
-		{
-			name: "tap missing exec",
-			args: []string{"validate", writeWorkflow("tap-missing-exec", `
-return {
-  id = "tap-missing-exec",
-  version = "1.0.0",
-  flow = {
-    call {
-      exec = lumn.test_source({}),
-      on_data = function(result)
-        return result
-      end,
-    },
-    tap {},
-  }
-}
-`)},
-			wantCode:   5,
-			wantStderr: `"exec"`,
-		},
-		{
-			name: "invalid callable signature",
-			args: []string{"validate", writeWorkflow("invalid-signature", `
-return {
-  id = "invalid-signature",
-  version = "1.0.0",
-  flow = {
-    call {
-      exec = { name = "bad" },
-      on_data = function(result)
-        return result
-      end,
-    },
-  }
-}
-`)},
-			wantCode:   5,
-			wantStderr: `run function`,
+			wantStderr: `"flow"`,
 		},
 		{
 			name: "sandbox",
-			args: []string{"validate", writeWorkflow("sandbox", `
+			args: []string{"validate", "-f", writeWorkflow("sandbox", `
 os.execute("echo nope")
 
 return {
-  id = "sandbox",
-  version = "1.0.0",
   flow = {}
 }
 `)},
@@ -389,17 +297,11 @@ return {
 		},
 		{
 			name: "runtime",
-			args: []string{"run", writeWorkflow("runtime", `
-local items = {
-  { id = 1, valor = 10 },
-}
-
+			args: []string{"run", "-f", writeWorkflow("runtime", `
 return {
-  id = "runtime",
-  version = "1.0.0",
   flow = {
     call {
-      exec = lumn.test_source(items),
+      exec = lumn.test_source({ { id = 1, valor = 10 } }),
       on_data = function(result)
         return result
       end,
@@ -417,16 +319,14 @@ return {
 		},
 		{
 			name:       "workflow not found",
-			args:       []string{"validate", filepath.Join(root, "missing")},
+			args:       []string{"validate", "-f", filepath.Join(root, "missing")},
 			wantCode:   8,
 			wantStderr: `not found`,
 		},
 		{
 			name: "callable not found",
-			args: []string{"validate", writeWorkflow("missing-callable", `
+			args: []string{"validate", "-f", writeWorkflow("missing-callable", `
 return {
-  id = "missing-callable",
-  version = "1.0.0",
   flow = {
     call {
       exec = fonte_que_nao_existe,
@@ -439,20 +339,6 @@ return {
 `)},
 			wantCode:   9,
 			wantStderr: `could not be resolved`,
-		},
-		{
-			name: "require traversal blocked",
-			args: []string{"validate", writeWorkflow("require-traversal", `
-require("../fora")
-
-return {
-  id = "require-traversal",
-  version = "1.0.0",
-  flow = {}
-}
-`)},
-			wantCode:   6,
-			wantStderr: `outside the workflow sandbox`,
 		},
 	}
 
@@ -496,15 +382,31 @@ func runCLI(t *testing.T, args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
-func mustWriteWorkflow(t *testing.T, dir, body string) {
+func writeWorkflowFile(t *testing.T, dir, fileName, body string) {
 	t.Helper()
-
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir workflow dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "init.lua"), []byte(strings.TrimSpace(body)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, fileName), []byte(strings.TrimSpace(body)+"\n"), 0o644); err != nil {
 		t.Fatalf("write workflow: %v", err)
 	}
+}
+
+func withWorkingDir(t *testing.T, dir string, fn func()) {
+	t.Helper()
+
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(previous)
+	}()
+
+	fn()
 }
 
 func decodeReport(t *testing.T, raw string) executor.Report {

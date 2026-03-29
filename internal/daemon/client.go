@@ -8,11 +8,30 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/pretodev/lumn/internal/daemonapi"
 )
+
+var ErrDaemonNotRunning = errors.New("daemon is not running")
+
+type APIError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *APIError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func IsDaemonNotRunning(err error) bool {
+	return errors.Is(err, ErrDaemonNotRunning)
+}
 
 type Client struct {
 	paths   Paths
@@ -43,21 +62,27 @@ func (c *Client) Health(ctx context.Context) (daemonapi.HealthResponse, error) {
 	return out, err
 }
 
-func (c *Client) StartWorkflow(ctx context.Context, path string) (daemonapi.WorkflowMutationResponse, error) {
+func (c *Client) StartWorkflow(ctx context.Context, req daemonapi.StartWorkflowRequest) (daemonapi.WorkflowMutationResponse, error) {
 	var out daemonapi.WorkflowMutationResponse
-	err := c.doJSON(ctx, http.MethodPost, "/api/v1/workflows", daemonapi.StartWorkflowRequest{Path: path}, &out)
+	err := c.doJSON(ctx, http.MethodPost, "/api/v1/workflows", req, &out)
 	return out, err
 }
 
 func (c *Client) StopWorkflow(ctx context.Context, workflowID string) (daemonapi.WorkflowMutationResponse, error) {
 	var out daemonapi.WorkflowMutationResponse
-	err := c.doJSON(ctx, http.MethodDelete, "/api/v1/workflows/"+workflowID, nil, &out)
+	err := c.doJSON(ctx, http.MethodPost, "/api/v1/workflows/"+url.PathEscape(workflowID)+"/stop", nil, &out)
+	return out, err
+}
+
+func (c *Client) DeleteWorkflow(ctx context.Context, workflowID string) (daemonapi.WorkflowMutationResponse, error) {
+	var out daemonapi.WorkflowMutationResponse
+	err := c.doJSON(ctx, http.MethodDelete, "/api/v1/workflows/"+url.PathEscape(workflowID), nil, &out)
 	return out, err
 }
 
 func (c *Client) RestartWorkflow(ctx context.Context, workflowID string) (daemonapi.WorkflowMutationResponse, error) {
 	var out daemonapi.WorkflowMutationResponse
-	err := c.doJSON(ctx, http.MethodPost, "/api/v1/workflows/"+workflowID+"/restart", nil, &out)
+	err := c.doJSON(ctx, http.MethodPost, "/api/v1/workflows/"+url.PathEscape(workflowID)+"/restart", nil, &out)
 	return out, err
 }
 
@@ -69,13 +94,13 @@ func (c *Client) ListWorkflows(ctx context.Context) (daemonapi.WorkflowsListResp
 
 func (c *Client) WorkflowStatus(ctx context.Context, workflowID string) (daemonapi.WorkflowDetailResponse, error) {
 	var out daemonapi.WorkflowDetailResponse
-	err := c.doJSON(ctx, http.MethodGet, "/api/v1/workflows/"+workflowID+"/status", nil, &out)
+	err := c.doJSON(ctx, http.MethodGet, "/api/v1/workflows/"+url.PathEscape(workflowID)+"/status", nil, &out)
 	return out, err
 }
 
 func (c *Client) ExecWorkflow(ctx context.Context, workflowID string) (daemonapi.ExecWorkflowResponse, error) {
 	var out daemonapi.ExecWorkflowResponse
-	err := c.doJSON(ctx, http.MethodPost, "/api/v1/workflows/"+workflowID+"/exec", nil, &out)
+	err := c.doJSON(ctx, http.MethodPost, "/api/v1/workflows/"+url.PathEscape(workflowID)+"/exec", nil, &out)
 	return out, err
 }
 
@@ -110,9 +135,15 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	if resp.StatusCode >= 400 {
 		var failure daemonapi.ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&failure); err == nil && failure.Error != "" {
-			return errors.New(failure.Error)
+			return &APIError{
+				StatusCode: resp.StatusCode,
+				Message:    failure.Error,
+			}
 		}
-		return fmt.Errorf("daemon request failed with status %s", resp.Status)
+		return &APIError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("daemon request failed with status %s", resp.Status),
+		}
 	}
 
 	if out == nil {
@@ -127,7 +158,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 func (c *Client) wrapTransportError(err error) error {
 	var netErr *net.OpError
 	if errors.As(err, &netErr) || strings.Contains(err.Error(), "connect: no such file") || strings.Contains(err.Error(), "connect: connection refused") {
-		return fmt.Errorf("Cannot connect to the lumn daemon at %s. Is the daemon running? (lumn daemon start)", c.paths.TransportDescription())
+		return fmt.Errorf("%w - start it with 'lumn daemon start'", ErrDaemonNotRunning)
 	}
 	return err
 }

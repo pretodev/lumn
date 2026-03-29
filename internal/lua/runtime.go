@@ -128,7 +128,7 @@ func (r *Runtime) LoadWorkflow(initPath string) (string, error) {
 	}
 	if !r.State.IsTable(-1) {
 		defer r.State.SetTop(0)
-		return "", errkind.New(errkind.ErrStructure, errkind.TypeStructure, "workflow init.lua must return a table")
+		return "", errkind.New(errkind.ErrStructure, errkind.TypeStructure, "workflow file must return a table")
 	}
 	ref := r.StoreRef(-1)
 	r.State.SetTop(0)

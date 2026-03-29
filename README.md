@@ -1,19 +1,18 @@
 # lumn
 
-`lumn` é um engine de workflows em Lua, embutido em Go, com sandbox e uma DSL mínima baseada em pipeline.
+`lumn` e um runtime de workflows em Lua, embutido em Go, com sandbox, CLI local e daemon.
 
-O estado atual do projeto cobre a fase `engine-core`, alinhada ao subconjunto já implementado do Documento de Visão:
+O estado atual do projeto cobre:
 
 - VM Lua embutida via `github.com/speedata/go-lua`
-- sandbox para bloquear I/O e execução arbitrária
-- `require` restrito a módulos locais do workflow e ao `_shared/` do workspace resolvido
+- sandbox para bloquear I/O e execucao arbitraria
+- `require` restrito a modulos locais do workflow e ao `_shared/` do workspace resolvido
 - primitivos suportados: `call`, `set`, `filter` e `tap`
-- estado global da execução via `lumn.get("chave")` e `lumn.set("chave", valor)`
-- callable builtin `lumn.test_source(items)`
-- CLI com `init`, `validate` e `run`
-- saída estruturada em JSON no `stdout`
+- estado global via `lumn.get("chave")` e `lumn.set("chave", valor)`
+- triggers `manual`, `scheduler`, `webhook` e `file_watcher` no daemon
+- CLI com `validate`, `run`, `start`, `stop`, `delete`, `restart`, `list`, `watch`, `logs` e `daemon`
 
-Mais contexto de produto está em [docs/index.md](docs/index.md). A especificação implementada nesta fase está em [.specs/engine-core.md](.specs/engine-core.md).
+Mais contexto de produto esta em [docs/index.md](docs/index.md).
 
 ## Requisitos
 
@@ -39,7 +38,7 @@ Build local sem instalar:
 make build
 ```
 
-Instalar o binario do daemon placeholder:
+Instalar o binario do daemon:
 
 ```bash
 make install-daemon
@@ -53,7 +52,7 @@ Rodar a suite:
 make test
 ```
 
-Também funciona:
+Tambem funciona:
 
 ```bash
 go test ./...
@@ -61,27 +60,7 @@ go test ./...
 
 ## Quickstart
 
-Crie um workflow:
-
-```bash
-lumn init pedidos
-```
-
-Valide:
-
-```bash
-lumn validate pedidos
-```
-
-Execute:
-
-```bash
-lumn run pedidos
-```
-
-`lumn run` sempre escreve JSON no `stdout`. Qualquer `print(...)` do workflow vai para `stderr`.
-
-## Exemplo de workflow
+Crie um `lumn.lua`:
 
 ```lua
 local items = {
@@ -94,12 +73,10 @@ local log_item = {
   name = "log_item",
   run = function(input)
     print(input.nome .. " aprovado")
-  end
+  end,
 }
 
 return {
-  id = "pedidos",
-  version = "1.0.0",
   flow = {
     call {
       exec = lumn.test_source(items),
@@ -109,8 +86,6 @@ return {
     },
     set {
       to = function(item)
-        lumn.set("ultimo_item_id", item.id)
-        item.ultimo_item_id = lumn.get("ultimo_item_id")
         item.processado = true
         return item
       end,
@@ -126,6 +101,78 @@ return {
   }
 }
 ```
+
+Valide:
+
+```bash
+lumn validate
+```
+
+Execute localmente:
+
+```bash
+lumn run
+```
+
+Suba o daemon e registre o workflow:
+
+```bash
+lumn daemon start
+lumn start
+lumn list
+```
+
+`lumn run` sempre escreve JSON no `stdout`. Qualquer `print(...)` do workflow vai para `stderr`.
+
+## Entrypoint e resolucao
+
+O runtime usa estas regras:
+
+| Situacao | Entrypoint |
+| --- | --- |
+| `lumn run` / `lumn validate` sem alvo | `./lumn.lua` |
+| `-f <pasta>` | `<pasta>/init.lua`, depois `<pasta>/lumn.lua` |
+| `-f <arquivo>` | arquivo exato |
+| `lumn run <selector>` | 1. daemon, 2. pasta local, 3. `<selector>.lua` |
+
+O nome do workflow em modo standalone e inferido do contexto:
+
+- pasta atual para `lumn run` sem argumento
+- nome da pasta para `-f <pasta>`
+- nome do arquivo sem extensao para `-f <arquivo>`
+
+Em modo standalone, `version` no JSON e sempre `"latest"`.
+
+## CLI
+
+Comandos disponiveis:
+
+```text
+lumn validate
+lumn validate -f <arquivo|pasta>
+
+lumn run
+lumn run <id|name>
+lumn run -f <arquivo|pasta>
+
+lumn start [name[:tag]] [-f <arquivo|pasta>]
+lumn stop <id|name>
+lumn delete <id|name>
+lumn restart <id|name>
+lumn list
+lumn watch [id|name]
+lumn logs [id|name] [--lines <n>] [--no-follow] [--since <duration>] [--level <level>] [--step <nome>]
+
+lumn daemon start
+lumn daemon stop
+lumn daemon status
+```
+
+Observacoes:
+
+- `lumn start` exige o daemon ativo.
+- `lumn watch` e `lumn logs` ja estao registrados na CLI, mas ainda retornam placeholder.
+- `lumn list` mostra `ID`, `NAME`, `VERSION`, `STATUS`, `LAST RUN`, `FAILS` e `NEXT RUN`.
 
 ## DSL minima
 
@@ -155,14 +202,12 @@ Semantica atual:
 
 - `call` e o unico primitivo que cria a lista inicial de itens
 - `call.exec` roda uma vez e `call.on_data` transforma cada resultado bruto em item
-- `set.to` transforma o item atual sem receber `res` ou `ctx`
+- `set.to` transforma o item atual
 - `filter.condition` decide se o item continua no batch
 - `tap.exec` recebe uma copia do item atual e seu retorno e descartado
 - quando o batch fica vazio durante a execucao, o workflow encerra com status `empty`
 
 ## Workspace e `require`
-
-`lumn run` e `lumn validate` continuam aceitando uma pasta de workflow ou um `init.lua`.
 
 Ao carregar um workflow, o engine infere o workspace subindo na arvore de diretorios ate encontrar um destes marcadores:
 
@@ -178,14 +223,14 @@ Se nenhum marcador existir, o parent da pasta do workflow vira o workspace. O `r
 
 Qualquer tentativa de sair desse sandbox falha com erro `ERR_SANDBOX`.
 
-## Saida do run
+## Saida do `run`
 
 Exemplo de sucesso:
 
 ```json
 {
   "workflow": "pedidos",
-  "version": "1.0.0",
+  "version": "latest",
   "status": "ok",
   "items_in": 3,
   "items_out": 2,
@@ -199,7 +244,7 @@ Exemplo de batch vazio:
 ```json
 {
   "workflow": "pedidos",
-  "version": "1.0.0",
+  "version": "latest",
   "status": "empty",
   "items_in": 0,
   "items_out": 0,
@@ -213,7 +258,7 @@ Exemplo de erro:
 ```json
 {
   "workflow": "pedidos",
-  "version": "1.0.0",
+  "version": "latest",
   "status": "error",
   "items_in": 3,
   "items_out": 0,
@@ -243,23 +288,3 @@ Exemplo de erro:
 | `7` | `ERR_RUNTIME` |
 | `8` | `ERR_WORKFLOW_NOT_FOUND` |
 | `9` | `ERR_CALLABLE_NOT_FOUND` |
-
-## Estrutura atual
-
-```text
-cmd/lumn      CLI da fase 0
-cmd/lumnd     daemon placeholder
-internal/lua  runtime Lua e sandbox
-internal/dag  parse e validacao do workflow
-internal/executor
-internal/engine
-pkg/errkind
-pkg/primitive
-```
-
-## Limitacoes desta fase
-
-- `lumnd` ainda nao implementa o runtime de daemon
-- o executor e sequencial e fail-fast
-- o DAG atual e linear; `pipe`, `once`, `distinct`, `branch` e `parallel` ainda nao existem
-- nao ha plugins externos, triggers, persistencia ou UI nesta entrega

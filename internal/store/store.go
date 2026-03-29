@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/pretodev/lumn/internal/executor"
@@ -33,6 +34,7 @@ type Store struct {
 
 type Workflow struct {
 	ID        string
+	Name      string
 	Version   string
 	Path      string
 	Status    string
@@ -113,6 +115,7 @@ func (s *Store) UpsertWorkflow(workflow Workflow) error {
 	}
 	return s.queries.UpsertWorkflow(context.Background(), dbsqlc.UpsertWorkflowParams{
 		ID:        workflow.ID,
+		Name:      workflow.Name,
 		Version:   workflow.Version,
 		Path:      workflow.Path,
 		Status:    workflow.Status,
@@ -162,10 +165,88 @@ func (s *Store) ListActiveWorkflows() ([]Workflow, error) {
 
 func (s *Store) SetWorkflowStatus(id, status string) error {
 	return s.queries.SetWorkflowStatus(context.Background(), dbsqlc.SetWorkflowStatusParams{
-		Status:    status,
-		UpdatedAt: utcNow(),
-		ID:        id,
+		Status: status,
+		ID:     id,
 	})
+}
+
+func (s *Store) GetWorkflowByNameVersion(name, version string) (Workflow, bool, error) {
+	row := s.db.QueryRowContext(
+		context.Background(),
+		`SELECT id, name, version, path, status, created_at, updated_at
+FROM workflows
+WHERE name = ?1 AND version = ?2`,
+		name,
+		version,
+	)
+
+	workflow, err := scanWorkflow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Workflow{}, false, nil
+	}
+	if err != nil {
+		return Workflow{}, false, err
+	}
+	return workflow, true, nil
+}
+
+func (s *Store) ResolveWorkflowSelector(selector string) (Workflow, bool, error) {
+	workflow, found, err := s.GetWorkflow(selector)
+	if err != nil || found {
+		return workflow, found, err
+	}
+
+	rows, err := s.db.QueryContext(
+		context.Background(),
+		`SELECT id, name, version, path, status, created_at, updated_at
+FROM workflows
+WHERE name = ?1
+ORDER BY CASE WHEN version = 'latest' THEN 0 ELSE 1 END, updated_at DESC, id`,
+		selector,
+	)
+	if err != nil {
+		return Workflow{}, false, err
+	}
+	defer rows.Close()
+
+	matches := make([]Workflow, 0, 4)
+	for rows.Next() {
+		workflow, err := scanWorkflow(rows)
+		if err != nil {
+			return Workflow{}, false, err
+		}
+		matches = append(matches, workflow)
+	}
+	if err := rows.Err(); err != nil {
+		return Workflow{}, false, err
+	}
+	if len(matches) == 0 {
+		return Workflow{}, false, nil
+	}
+	if len(matches) == 1 || matches[0].Version == "latest" {
+		return matches[0], true, nil
+	}
+	return Workflow{}, false, fmt.Errorf("workflow %q is ambiguous; use the workflow id", selector)
+}
+
+func (s *Store) CountFailedExecutionsSince(workflowID string, since time.Time) (int, error) {
+	row := s.db.QueryRowContext(
+		context.Background(),
+		`SELECT COUNT(*)
+FROM executions
+WHERE workflow_id = ?1
+  AND status = ?2
+  AND COALESCE(finished_at, started_at, queued_at) >= ?3`,
+		workflowID,
+		StatusError,
+		since.UTC(),
+	)
+
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Store) ReplaceWorkflowTriggers(workflowID string, triggers []Trigger) ([]Trigger, error) {
@@ -350,7 +431,7 @@ func (s *Store) CancelQueuedExecutions(workflowID, message string) ([]int64, err
 	finishedAt := utcNow()
 	for _, row := range rows {
 		reportPayload, err := json.Marshal(executor.Report{
-			Workflow: workflowID,
+			Workflow: row.Name,
 			Version:  row.Version,
 			Status:   StatusError,
 			Errors: []executor.ReportError{{
@@ -386,7 +467,7 @@ func (s *Store) MarkStaleRunningExecutions(message string) error {
 	}
 	for _, row := range rows {
 		report := executor.Report{
-			Workflow: row.WorkflowID,
+			Workflow: row.Name,
 			Version:  row.Version,
 			Status:   StatusError,
 			Errors: []executor.ReportError{{
@@ -479,6 +560,7 @@ func runMigrations(db *sql.DB) error {
 func fromWorkflowRow(row dbsqlc.Workflow) Workflow {
 	return Workflow{
 		ID:        row.ID,
+		Name:      row.Name,
 		Version:   row.Version,
 		Path:      row.Path,
 		Status:    row.Status,
@@ -548,4 +630,22 @@ func rollback(tx *sql.Tx) {
 	if tx != nil {
 		_ = tx.Rollback()
 	}
+}
+
+type workflowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanWorkflow(scanner workflowScanner) (Workflow, error) {
+	workflow := Workflow{}
+	err := scanner.Scan(
+		&workflow.ID,
+		&workflow.Name,
+		&workflow.Version,
+		&workflow.Path,
+		&workflow.Status,
+		&workflow.CreatedAt,
+		&workflow.UpdatedAt,
+	)
+	return workflow, err
 }

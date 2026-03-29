@@ -410,7 +410,7 @@ lumn.env("SAP_BASE_URL")
 lumn.secret("SAP_CLIENT_SECRET")
 ```
 
-A distinção entre `lumn.env` e `lumn.secret` é intencional: `env` é para configuração não-sensível que pode aparecer em logs e no output de `lumn status`; `secret` é para credenciais que o engine garante nunca serializar.
+A distinção entre `lumn.env` e `lumn.secret` é intencional: `env` é para configuração não-sensível que pode aparecer em logs e no output de `lumn list`; `secret` é para credenciais que o engine garante nunca serializar.
 
 ### Exemplo comentado
 
@@ -932,7 +932,7 @@ lumn.triggers.webhook {
 },
 ```
 
-O daemon expõe os webhooks num servidor HTTP local. A URL gerada é exibida na Web UI e via `lumn status`.
+O daemon expõe os webhooks num servidor HTTP local. A URL gerada é exibida na Web UI e via `lumn daemon status`.
 
 ### File watcher
 
@@ -1182,8 +1182,8 @@ O servidor MCP expõe ferramentas que o LLM pode chamar durante uma conversa:
 | Ferramenta          | O que faz                                                       |
 | ------------------- | --------------------------------------------------------------- |
 | `list_workflows`    | Lista todos os workflows com status, última execução e triggers |
-| `get_workflow`      | Retorna o conteúdo do `init.lua` de um workflow                 |
-| `create_workflow`   | Gera um `init.lua` a partir de descrição em linguagem natural   |
+| `get_workflow`      | Retorna o conteúdo do arquivo de entrypoint de um workflow      |
+| `create_workflow`   | Gera um arquivo de workflow a partir de descrição em linguagem natural |
 | `run_workflow`      | Executa um workflow e retorna resultado estruturado por step    |
 | `get_logs`          | Busca logs por workflow, step, status e intervalo de tempo      |
 | `validate_workflow` | Valida sintaxe e DAG, retorna erros com sugestões de correção   |
@@ -1200,11 +1200,11 @@ Quando o LLM chama `create_workflow`, o servidor MCP injeta automaticamente no c
 - Workflows existentes no projeto (para manter consistência de estilo)
 - Credenciais configuradas (apenas os nomes — para o LLM saber o que referenciar com `lumn.secret`)
 
-Isso permite que o LLM gere `init.lua` correto e idiomático, usando os plugins já instalados, sem precisar adivinhar nomes ou assinar contratos de API.
+Isso permite que o LLM gere o arquivo de workflow correto e idiomático, usando os plugins já instalados, sem precisar adivinhar nomes ou assinar contratos de API.
 
 ### Caso de uso típico
 
-Um desenvolvedor no Cursor descreve o que precisa em linguagem natural. O assistente, com o MCP server do lumn conectado, chama `list_plugins` para ver quais integrações estão disponíveis, depois `create_workflow` com a descrição e retorna um `init.lua` completo — pronto para ser validado com `lumn validate` e ativado com `lumn start`.
+Um desenvolvedor no Cursor descreve o que precisa em linguagem natural. O assistente, com o MCP server do lumn conectado, chama `list_plugins` para ver quais integrações estão disponíveis, depois `create_workflow` com a descrição e retorna um arquivo de workflow completo — pronto para ser validado com `lumn validate` e ativado com `lumn start`.
 
 ---
 
@@ -1302,7 +1302,7 @@ Um endpoint `/health` retorna o status de saúde do daemon e de cada workflow re
 
 ### Modelo de execução
 
-O engine converte o `flow` de um `init.lua` em um **DAG (grafo acíclico dirigido)** de nodes. O executor percorre esse DAG em ordem topológica, respeitando dependências declaradas.
+O engine converte o `flow` do arquivo de workflow em um **DAG (grafo acíclico dirigido)** de nodes. O executor percorre esse DAG em ordem topológica, respeitando dependências declaradas.
 
 Cada node corresponde a um primitivo da DSL: `call`, `tap`, `pipe`, `set`, `filter`, `distinct`, `once`, `branch` e `parallel`. O `call` é sempre o node raiz — é o único primitivo que cria a lista de itens; todos os outros a consomem e transformam.
 
@@ -1320,7 +1320,7 @@ Em vez de expor globals individuais por primitive, o lumn registra um único obj
 - Funções utilitárias (`lumn.env`, `lumn.secret`, `lumn.bearer`, `lumn.date.*`)
 - Namespaces de plugins carregados dinamicamente a partir do `lumn.lock`
 
-Quando o engine carrega um `init.lua`, ele primeiro resolve todos os plugins declarados no projeto, registra seus callables sob `lumn.plugins.*`, e só então executa o arquivo. Isso garante que qualquer referência a `lumn.plugins.outlook` ou `lumn.ai.agent` esteja disponível no momento em que o arquivo é avaliado.
+Quando o engine carrega o arquivo de workflow, ele primeiro resolve todos os plugins declarados no projeto, registra seus callables sob `lumn.plugins.*`, e só então executa o arquivo. Isso garante que qualquer referência a `lumn.plugins.outlook` ou `lumn.ai.agent` esteja disponível no momento em que o arquivo é avaliado.
 
 ### Sandboxing da VM Lua
 
@@ -1364,7 +1364,7 @@ lumn/
 | Critério                         | lumn                   | n8n                  | Airflow            | Temporal           |
 | -------------------------------- | ---------------------- | -------------------- | ------------------ | ------------------ |
 | **Linguagem de definição**       | Lua DSL (arquivo)      | Visual (JSON)        | Python             | Go / Java / TS     |
-| **Estrutura do projeto**         | Pastas com `init.lua`  | BD interno           | Módulos Python     | Código nativo      |
+| **Estrutura do projeto**         | `lumn.lua` ou pastas com `init.lua` | BD interno | Módulos Python | Código nativo |
 | **Versionamento com Git**        | Nativo                 | Export JSON          | Nativo             | Nativo             |
 | **Testabilidade**                | `lumn run` local       | Manual               | pytest             | SDK próprio        |
 | **Instalação**                   | Binário único          | Docker pesado        | pip + infra        | Cluster + servidor |
@@ -1393,7 +1393,7 @@ O desenvolvimento está organizado em fases, cada uma entregando valor utilizáv
 
 ### Phase 0 — Foundation (semanas 1–6)
 
-Engine core: VM Lua embarcada, global `lumn` com primitivos da DSL, DAG builder, executor sequencial e CLI básica (`init`, `run`, `validate`).
+Engine core: VM Lua embarcada, global `lumn` com primitivos da DSL, DAG builder, executor sequencial e CLI básica (`run`, `validate`).
 
 **Milestone:** `lumn run order_cancel/` executa o workflow de cancelamento do tutorial no terminal, mostrando o log de cada step, com output correto e erros com stack trace.
 
@@ -1413,13 +1413,13 @@ Web UI com DAG visualizer em tempo real via WebSocket, execution history complet
 
 Plugin registry baseado em Git com formato `usuario/plugin` e `usuario/path/plugin`, `lumn.lock` para reprodutibilidade, Plugin SDK completo com `CredentialSpec`, biblioteca padrão e sandboxing por subprocess gRPC.
 
-**Milestone:** `lumn plugin add pretodev/outlook` instala o plugin. `lumn credential add outlook` abre o browser para OAuth. `lumn.plugins.outlook {}` funciona no `init.lua` sem configuração adicional.
+**Milestone:** `lumn plugin add pretodev/outlook` instala o plugin. `lumn credential add outlook` abre o browser para OAuth. `lumn.plugins.outlook {}` funciona no arquivo de workflow sem configuração adicional.
 
 ### Phase 4 — MCP + AI (semanas 29–32)
 
 Servidor MCP com todas as ferramentas documentadas, context injection automático de plugins e credenciais disponíveis, e suporte a criação de workflows via linguagem natural.
 
-**Milestone:** Descrever o workflow de cancelamento ao Claude no Cursor. Receber um `init.lua` correto usando os plugins instalados, pronto para `lumn validate` e `lumn start`.
+**Milestone:** Descrever o workflow de cancelamento ao Claude no Cursor. Receber um arquivo de workflow correto usando os plugins instalados, pronto para `lumn validate` e `lumn start`.
 
 ### Phase 5 — Deploy e produção (semanas 33–40)
 

@@ -10,8 +10,6 @@ import (
 )
 
 type Workflow struct {
-	ID      string
-	Version string
 	Nodes   []Node
 	Runtime *luaenv.Runtime
 }
@@ -27,16 +25,6 @@ type Node struct {
 }
 
 func Build(rt *luaenv.Runtime, workflowRef string) (*Workflow, error) {
-	id, ok := rt.TableStringFieldRef(workflowRef, "id")
-	if !ok || id == "" {
-		return nil, errkind.New(errkind.ErrStructure, errkind.TypeStructure, `workflow field "id" must be a non-empty string`)
-	}
-
-	version, ok := rt.TableStringFieldRef(workflowRef, "version")
-	if !ok || version == "" {
-		return nil, errkind.New(errkind.ErrStructure, errkind.TypeStructure, `workflow field "version" must be a non-empty string`)
-	}
-
 	flowRef, ok := rt.TableRefFieldRef(workflowRef, "flow")
 	if !ok || rt.RefType(flowRef) != golua.TypeTable {
 		return nil, errkind.New(errkind.ErrStructure, errkind.TypeStructure, `workflow field "flow" must be a table`)
@@ -154,8 +142,6 @@ func Build(rt *luaenv.Runtime, workflowRef string) (*Workflow, error) {
 	}
 
 	return &Workflow{
-		ID:      id,
-		Version: version,
 		Nodes:   nodes,
 		Runtime: rt,
 	}, nil
