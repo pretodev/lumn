@@ -64,8 +64,9 @@ func Run(workflow *dag.Workflow) (Report, error) {
 				}
 			}
 
-			items = make([]itemState, 0, rt.TableLen(sourceRef))
-			for i := 1; i <= rt.TableLen(sourceRef); i++ {
+			sourceLen := rt.TableLen(sourceRef)
+			items = make([]itemState, 0, sourceLen)
+			for i := 1; i <= sourceLen; i++ {
 				resultRef := rt.ArrayValueRef(sourceRef, i)
 				refs, err := rt.CallFunction(node.OnDataRef, 1, resultRef)
 				if err != nil {
