@@ -1,20 +1,30 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"text/tabwriter"
 	"text/template"
+	"time"
 
+	"github.com/pretodev/lumn/internal/daemon"
+	"github.com/pretodev/lumn/internal/daemonapi"
 	"github.com/pretodev/lumn/internal/engine"
+	"github.com/pretodev/lumn/internal/executor"
 	"github.com/pretodev/lumn/pkg/errkind"
 )
 
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: lumn <init|validate|run> <workflow>")
+		printUsage(stderr)
 		return int(errkind.ErrGeneric)
 	}
 
@@ -46,18 +56,239 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return int(errkind.ErrGeneric)
 		}
 		report, code := engine.RunTarget(args[1], stderr)
-		enc := json.NewEncoder(stdout)
-		enc.SetEscapeHTML(false)
-		_ = enc.Encode(report)
+		writeReport(stdout, report)
 		return code
+	case "start":
+		if len(args) != 2 {
+			fmt.Fprintln(stderr, "usage: lumn start <workflow>")
+			return int(errkind.ErrGeneric)
+		}
+		client, err := newDaemonClient()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		resp, err := client.StartWorkflow(context.Background(), args[1])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		fmt.Fprintln(stdout, resp.Message)
+		return int(errkind.OK)
+	case "stop":
+		if len(args) != 2 {
+			fmt.Fprintln(stderr, "usage: lumn stop <workflow-id>")
+			return int(errkind.ErrGeneric)
+		}
+		client, err := newDaemonClient()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		resp, err := client.StopWorkflow(context.Background(), args[1])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		fmt.Fprintln(stdout, resp.Message)
+		return int(errkind.OK)
+	case "restart":
+		if len(args) != 2 {
+			fmt.Fprintln(stderr, "usage: lumn restart <workflow-id>")
+			return int(errkind.ErrGeneric)
+		}
+		client, err := newDaemonClient()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		resp, err := client.RestartWorkflow(context.Background(), args[1])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		fmt.Fprintln(stdout, resp.Message)
+		return int(errkind.OK)
+	case "status":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "usage: lumn status")
+			return int(errkind.ErrGeneric)
+		}
+		client, err := newDaemonClient()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		resp, err := client.ListWorkflows(context.Background())
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		renderWorkflowStatus(stdout, resp)
+		return int(errkind.OK)
+	case "exec":
+		if len(args) != 2 {
+			fmt.Fprintln(stderr, "usage: lumn exec <workflow-id>")
+			return int(errkind.ErrGeneric)
+		}
+		client, err := newDaemonClient()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		resp, err := client.ExecWorkflow(context.Background(), args[1])
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		writeReport(stdout, resp.Report)
+		return int(errkind.OK)
+	case "daemon":
+		return runDaemonCommand(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintln(stderr, "usage: lumn <init|validate|run> <workflow>")
+		printUsage(stderr)
+		return int(errkind.ErrGeneric)
+	}
+}
+
+func runDaemonCommand(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: lumn daemon <start|stop|status>")
+		return int(errkind.ErrGeneric)
+	}
+
+	switch args[0] {
+	case "start":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "usage: lumn daemon start")
+			return int(errkind.ErrGeneric)
+		}
+		if err := startDaemonProcess(); err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		fmt.Fprintln(stdout, "daemon started")
+		return int(errkind.OK)
+	case "stop":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "usage: lumn daemon stop")
+			return int(errkind.ErrGeneric)
+		}
+		client, err := newDaemonClient()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		if err := client.Shutdown(context.Background()); err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		fmt.Fprintln(stdout, "daemon stopped")
+		return int(errkind.OK)
+	case "status":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "usage: lumn daemon status")
+			return int(errkind.ErrGeneric)
+		}
+		client, err := newDaemonClient()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		health, err := client.Health(context.Background())
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		renderDaemonStatus(stdout, health)
+		return int(errkind.OK)
+	default:
+		fmt.Fprintln(stderr, "usage: lumn daemon <start|stop|status>")
 		return int(errkind.ErrGeneric)
 	}
 }
 
 type scaffoldData struct {
 	ID string
+}
+
+func newDaemonClient() (*daemon.Client, error) {
+	paths, err := daemon.DefaultPaths()
+	if err != nil {
+		return nil, err
+	}
+	return daemon.NewClient(paths), nil
+}
+
+func startDaemonProcess() error {
+	paths, err := daemon.DefaultPaths()
+	if err != nil {
+		return err
+	}
+	if err := paths.EnsureStateDir(); err != nil {
+		return err
+	}
+
+	client := daemon.NewClient(paths)
+	if _, err := client.Health(context.Background()); err == nil {
+		return errors.New("daemon is already running")
+	}
+
+	logFile, err := os.OpenFile(paths.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+
+	commandPath, err := resolveLumndBinary()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(commandPath)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.Env = os.Environ()
+	applyDaemonProcessAttrs(cmd)
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		if _, err := client.Health(context.Background()); err == nil {
+			_ = cmd.Process.Release()
+			return nil
+		}
+	}
+
+	_ = cmd.Process.Release()
+	return errors.New("daemon did not become ready in time")
+}
+
+func resolveLumndBinary() (string, error) {
+	if value := os.Getenv("LUMN_LUMND_BIN"); value != "" {
+		return value, nil
+	}
+
+	current, err := os.Executable()
+	if err == nil {
+		candidate := filepath.Join(filepath.Dir(current), daemonBinaryName())
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			return candidate, nil
+		}
+	}
+	return exec.LookPath(daemonBinaryName())
+}
+
+func daemonBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "lumnd.exe"
+	}
+	return "lumnd"
 }
 
 func initWorkflow(name string) error {
@@ -86,6 +317,48 @@ func initWorkflow(name string) error {
 	}
 
 	return nil
+}
+
+func writeReport(stdout io.Writer, report executor.Report) {
+	enc := json.NewEncoder(stdout)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(report)
+}
+
+func renderWorkflowStatus(stdout io.Writer, resp daemonapi.WorkflowsListResponse) {
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tVersion\tStatus\tTrigger\tNext Run\tLast Run\tLast Status")
+	for _, workflow := range resp.Workflows {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			workflow.ID,
+			workflow.Version,
+			workflow.Status,
+			strings.Join(workflow.Triggers, ","),
+			orDash(workflow.NextRun),
+			orDash(workflow.LastRun),
+			orDash(workflow.LastStatus),
+		)
+	}
+	_ = tw.Flush()
+}
+
+func renderDaemonStatus(stdout io.Writer, health daemonapi.HealthResponse) {
+	fmt.Fprintf(stdout, "running: %t\n", health.Running)
+	fmt.Fprintf(stdout, "transport: %s\n", health.Transport)
+	fmt.Fprintf(stdout, "webhook_port: %d\n", health.WebhookPort)
+	fmt.Fprintf(stdout, "active_workflows: %d\n", health.ActiveWorkflows)
+	fmt.Fprintf(stdout, "uptime_seconds: %d\n", health.UptimeSeconds)
+}
+
+func orDash(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage: lumn <init|validate|run|start|stop|restart|status|exec|daemon>")
 }
 
 const initTemplate = `local items = {

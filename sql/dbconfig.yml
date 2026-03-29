@@ -1,0 +1,11 @@
+development:
+  dialect: sqlite3
+  datasource: ./tmp/lumnd.db
+  dir: sql/migrations
+  table: schema_migrations
+
+test:
+  dialect: sqlite3
+  datasource: /tmp/lumn-test.db
+  dir: sql/migrations
+  table: schema_migrations

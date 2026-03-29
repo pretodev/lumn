@@ -60,3 +60,29 @@ assert(cloned.nested.numbers[3] == 3)
 		t.Fatalf("assert cloned arrays: %v", err)
 	}
 }
+
+func TestTriggerDataOutsideExecutionReturnsNoneAndIsIndependent(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "workflow")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatalf("mkdir workflow: %v", err)
+	}
+
+	rt, err := NewRuntime(workflowDir, root, io.Discard)
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	defer rt.Close()
+
+	if err := golua.DoString(rt.State, `
+first = lumn.trigger_data()
+first.type = "mutated"
+second = lumn.trigger_data()
+assert(first.type == "mutated")
+assert(second.type == "none")
+`); err != nil {
+		t.Fatalf("assert trigger data default: %v", err)
+	}
+}

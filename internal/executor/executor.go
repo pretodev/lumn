@@ -28,11 +28,15 @@ type ReportError struct {
 	Callable  string `json:"callable,omitempty"`
 }
 
+type RunOptions struct {
+	TriggerData map[string]any
+}
+
 type itemState struct {
 	ItemRef string
 }
 
-func Run(workflow *dag.Workflow) (Report, error) {
+func Run(workflow *dag.Workflow, opts RunOptions) (Report, error) {
 	report := Report{
 		Workflow: workflow.ID,
 		Version:  workflow.Version,
@@ -43,6 +47,9 @@ func Run(workflow *dag.Workflow) (Report, error) {
 	rt := workflow.Runtime
 	stateRef := rt.NewTableRef()
 	defer rt.DeleteRef(stateRef)
+	if err := rt.SetExecutionValue(stateRef, "__lumn_trigger_data", normalizeTriggerData(opts.TriggerData)); err != nil {
+		return report, err
+	}
 	rt.SetExecutionState(stateRef)
 	defer rt.SetExecutionState("")
 
@@ -189,6 +196,26 @@ func Run(workflow *dag.Workflow) (Report, error) {
 
 	report.ItemsOut = len(items)
 	return report, nil
+}
+
+func normalizeTriggerData(triggerData map[string]any) map[string]any {
+	if len(triggerData) == 0 {
+		return map[string]any{"type": "none"}
+	}
+	if _, ok := triggerData["type"]; !ok {
+		cloned := make(map[string]any, len(triggerData)+1)
+		for key, value := range triggerData {
+			cloned[key] = value
+		}
+		cloned["type"] = "none"
+		return cloned
+	}
+
+	cloned := make(map[string]any, len(triggerData))
+	for key, value := range triggerData {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func deleteRefs(rt *luaenv.Runtime, refs ...string) {
