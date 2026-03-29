@@ -83,7 +83,6 @@ func NewRuntime(workflowDir, workspaceDir string, stderr io.Writer) (*Runtime, e
 		{name: "math", fn: golua.MathOpen},
 		{name: "bit32", fn: golua.Bit32Open},
 		{name: "utf8", fn: golua.UTF8Open},
-		{name: "os", fn: golua.OSOpen},
 	} {
 		golua.Require(l, lib.name, lib.fn, true)
 		l.Pop(1)
