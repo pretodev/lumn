@@ -16,7 +16,9 @@
 6. [A linguagem de workflows](#6-a-linguagem-de-workflows)
 7. [Ecossistema de plugins](#7-ecossistema-de-plugins)
 8. [Interface visual](#8-interface-visual)
-9. [Gerenciamento de credenciais](#9-gerenciamento-de-credenciais)
+
+- **Sem testabilidade.** Nessas ferramentas, não existe um comando simples como `lumn run order_cancel` — a única forma de testar é executar manualmente no ambiente.
+
 10. [Data Tables](#10-data-tables)
 11. [Triggers](#11-triggers)
 12. [CLI e daemon](#12-cli-e-daemon)
@@ -164,50 +166,103 @@ A escolha de Lua como linguagem de definição de workflows não é acidental. L
 
 ### Estrutura de um workflow
 
-Cada workflow é uma **pasta** com um arquivo `init.lua` que retorna uma table de definição. Essa convenção mantém os workflows organizados, permite que arquivos auxiliares (templates, schemas, módulos locais) fiquem junto ao workflow que os usa, e torna o projeto navegável como qualquer outro projeto de software.
+Um workflow lumn é um **arquivo Lua** que retorna uma table com a definição do fluxo. O nome padrão é `lumn.lua` — análogo ao `Dockerfile` do Docker. Quando qualquer comando lumn é executado sem especificação explícita, o runtime procura `lumn.lua` automaticamente no diretório atual.
+
+Para workflows mais complexos — com templates, módulos auxiliares e assets — a estrutura pode ser uma **pasta**. Nesse caso, o entrypoint é `init.lua`, que tem prioridade sobre `lumn.lua` quando ambos existem.
+
+#### Regras de resolução de entrypoint
+
+| Situação                          | Entrypoint procurado | Prioridade |
+| --------------------------------- | -------------------- | ---------- |
+| Diretório atual, sem argumento    | `./lumn.lua`         | —          |
+| Pasta especificada                | `pasta/init.lua`     | 1º         |
+| Pasta especificada (sem init.lua) | `pasta/lumn.lua`     | 2º         |
+| Arquivo especificado com `-f`     | o arquivo informado  | exato      |
 
 ```
 meu-projeto/
+│
+├── lumn.lua                   ← workflow simples (entrypoint direto)
+│
 ├── order_cancel/
-│   ├── init.lua           ← definição do workflow
+│   ├── init.lua               ← entrypoint do workflow complexo
 │   ├── templates/
 │   │   ├── aprovado.html
 │   │   └── negado.html
-│   └── utils.lua          ← funções auxiliares locais
+│   └── utils.lua              ← módulo auxiliar local
 │
 ├── customer_sync/
-│   └── init.lua
+│   └── lumn.lua               ← também válido como entrypoint de pasta
 │
-├── inventory_alert/
-│   └── init.lua
-│
-└── lumn.lock              ← versões fixas dos plugins
+└── lumn.lock                  ← versões fixas dos plugins
 ```
 
-O `init.lua` retorna uma table com a definição completa do workflow. Não existe convenção mágica de nome de função — o arquivo é um módulo Lua comum.
+#### Formato do arquivo de workflow
+
+O arquivo retorna uma table com a definição do fluxo. Não existem metadados de identidade (`id`, `name`, `version`) no arquivo — esses são definidos em tempo de `lumn start`, pelo operador. O arquivo é código portável e reutilizável; a identidade é responsabilidade do runtime que o executa.
+
+```lua
+-- order_cancel/init.lua
+
+local outlook = lumn.plugins.outlook { key = "outlook.cancelamentos" }
+-- ... demais componentes ...
+
+return {
+  triggers = {
+    lumn.triggers.scheduler { interval = "15m" },
+  },
+
+  flow = {
+    call { ... },
+    pipe { ... },
+    -- ...
+  },
+
+  on_error = {
+    default = "skip_item",
+  },
+}
+```
+
+A separação é intencional: o mesmo arquivo pode ser registrado no daemon com nomes e versões diferentes em ambientes distintos — staging, produção, canary — sem nenhuma alteração no código.
 
 ### O global `lumn`
 
 As ferramentas, integrações e primitivos da plataforma são acessados através do global `lumn`, injetado pelo runtime no momento da execução. Não existe `require` para recursos da plataforma — `lumn` é o namespace único de tudo que o engine oferece.
 
-Na fase `engine-core`, a superfície implementada do runtime é propositalmente pequena:
+O global `lumn` organiza seus recursos em dois grupos:
+
+**Utilitários nativos do runtime** — sempre disponíveis, sem instalação de plugin:
 
 ```lua
-lumn.test_source(items) -- fonte builtin para testes e desenvolvimento local
-lumn.get("key")         -- lê estado global do workflow
-lumn.set("key", value)  -- grava estado global do workflow
+lumn.http.client { ... }       -- cliente HTTP genérico
+lumn.http.post { ... }         -- shorthand para POST
+lumn.ai.agent { ... }          -- agente IA
+lumn.ai.model.azure_openai { } -- modelo OpenAI via Azure
+lumn.ai.structured_parser { }  -- parser de output estruturado
+lumn.auth.bearer("key")        -- resolve token do estado global
+lumn.date.now()                -- data/hora atual
+lumn.date.add(date, days)      -- aritmética de datas
+lumn.env("NOME")               -- variável de ambiente
+lumn.secret("NOME")            -- credencial do vault
+lumn.get("key")                -- lê estado global do workflow
+lumn.set("key", value)         -- grava estado global do workflow
+lumn.triggers.scheduler { }    -- trigger por intervalo/cron
+lumn.triggers.webhook { }      -- trigger por HTTP
+lumn.triggers.file_watcher { } -- trigger por evento de arquivo
 ```
 
-Os primitivos atualmente disponíveis como globals são:
+**Plugins instalados** — acessados via `lumn.plugins.<nome>`:
 
 ```lua
-call   { ... }
-set    { ... }
-filter { ... }
-tap    { ... }
+lumn.plugins.outlook { ... }          -- Microsoft Outlook / Graph API
+lumn.plugins.sendgrid.send { ... }    -- SendGrid e-mail
+lumn.plugins.gdrive { ... }           -- Google Drive
+lumn.plugins.slack.message { ... }    -- Slack
+lumn.plugins.aws.s3 { ... }           -- Amazon S3
 ```
 
-APIs como `lumn.http.*`, `lumn.ai.*`, `lumn.plugins.*`, triggers e primitivos adicionais aparecem nesta documentação apenas como direção de roadmap para fases futuras. Nesta PR, eles ainda não fazem parte da superfície executável.
+A distinção é clara: `require` carrega arquivos Lua do disco (código local do projeto); `lumn.*` acessa o runtime; `lumn.plugins.*` acessa plugins instalados via `lumn plugin add`.
 
 ### Modelo de pipeline
 
@@ -217,7 +272,7 @@ Um workflow opera sobre uma **lista de itens** que flui por uma sequência de pr
 [emails] → call → tap → pipe → distinct → filter → once → pipe → pipe → set → branch → [sent]
 ```
 
-Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/filter` em JavaScript ou pipes em Unix. Quando a lista de itens fica vazia em qualquer ponto do fluxo atualmente suportado — por um `filter` sem resultados ou por uma fonte sem dados — o workflow encerra naturalmente com status `"empty"`. Não existe primitivo especial para isso; é o comportamento padrão do runtime.
+Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/filter` em JavaScript ou pipes em Unix. Quando a lista de itens fica vazia em qualquer ponto do fluxo — por um `filter` sem resultados, por uma fonte sem dados, ou por erros que descartaram todos os itens — o workflow encerra naturalmente com status `"empty"`. Não existe primitivo especial para isso; é o comportamento padrão do runtime.
 
 ### Primitivos da DSL
 
@@ -227,10 +282,13 @@ Todos os primitivos usam **sintaxe de table** — `primitivo { chave = valor }`.
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------- |
 | `call`     | Cria a lista de itens a partir de uma fonte externa. `on_data(result)` retorna a forma inicial do item.                         | — (cria itens) |
 | `tap`      | Efeito colateral puro. O callable recebe o item diretamente; o resultado é descartado.                                          | Nunca          |
+| `pipe`     | Chama um callable por item e mergeia o resultado. `on_data(item, result)` retorna o item atualizado.                            | Sim            |
 | `set`      | Transformação Lua pura, sem chamada externa. `to(item)` calcula valores derivados e retorna o item.                             | Sim            |
 | `filter`   | Remove itens onde `condition(item)` retorna falso.                                                                              | Não            |
-
-Primitivos como `pipe`, `distinct`, `once`, `branch` e `parallel` seguem no roadmap e ainda não foram implementados no runtime desta fase.
+| `distinct` | Remove duplicatas. `by(item)` retorna a chave de deduplicação; duplicatas são descartadas silenciosamente.                      | Não            |
+| `once`     | Executa um callable uma única vez para todo o lote (barreira). `on_data(result)` usa `lumn.set` para escrever no estado global. | Não            |
+| `branch`   | Roteia cada item para um sub-pipeline baseado em `condition(item)`.                                                             | Condicional    |
+| `parallel` | Executa sub-pipelines concorrentemente e aguarda todos convergirem.                                                             | Depende        |
 
 ### A separação entre `call`, `pipe` e `set`
 
@@ -417,11 +475,9 @@ local send_mail = lumn.plugins.sendgrid.send {
 }
 
 -- ── Definição do workflow ────────────────────────────────────────────────────
+-- Sem id, name ou version — identidade definida em lumn start, não no arquivo.
 
 return {
-  id      = "order_cancel",
-  version = "1.0.0",
-
   triggers = {
     lumn.triggers.scheduler { interval = "15m" },
   },
@@ -907,39 +963,142 @@ O sistema de triggers é extensível via plugins:
 
 A CLI é o ponto de entrada para tudo. Ela se comunica com o daemon via socket Unix quando este está rodando, e opera em modo standalone para comandos que não precisam do daemon (como `run` e `validate`).
 
+#### Resolução de arquivo
+
+Assim como o Docker procura um `Dockerfile` automaticamente, o lumn procura um `lumn.lua` no diretório atual quando nenhum argumento é fornecido. Para especificar explicitamente um arquivo ou pasta, use a flag `-f`:
+
+```sh
+lumn run                        # procura ./lumn.lua automaticamente
+lumn run -f cancelamento.lua    # arquivo explícito
+lumn run -f order_cancel        # pasta: usa order_cancel/init.lua (ou lumn.lua)
+lumn run order_cancel           # sem -f: 1º daemon por id/name, 2º pasta local, 3º arquivo .lua
 ```
-lumn init <nome>               Cria uma pasta de workflow com init.lua scaffold
-lumn run  <pasta/>             Executa uma vez, sem daemon (modo dev, logs no terminal)
-lumn validate <pasta/>         Valida sintaxe Lua e DAG sem executar
 
-lumn start <pasta/>            Registra workflow no daemon e ativa triggers
-lumn stop  <workflow-id>       Desativa triggers e remove do daemon
-lumn restart <workflow-id>     Recarrega o workflow (aplica mudanças no init.lua)
-lumn status                    Lista todos os workflows ativos com status e próximo run
-lumn logs  <workflow-id>       Exibe logs da última execução em tempo real
+Quando o argumento não usa `-f`, o daemon tem prioridade — se existir uma instância registrada com aquele id ou nome, ela é usada. Sem match no daemon, o runtime procura uma pasta com esse nome, e em seguida um arquivo `.lua`. A prioridade de resolução para pastas é sempre `init.lua` → `lumn.lua`.
 
-lumn plugin add    <ref>       Instala plugin (pretodev/outlook, pretodev/plugins/gdrive)
-lumn plugin remove <nome>      Desinstala plugin
-lumn plugin list               Lista plugins instalados com versão
-lumn plugin update             Atualiza todos os plugins respeitando o lumn.lock
+#### Referência de comandos
 
-lumn credential add    <key>   Executa o fluxo de setup guiado do plugin para <key>
-lumn credential list           Lista credenciais (apenas nomes, nunca valores)
-lumn credential renew  <key>   Renova uma credencial expirada
-lumn credential remove <key>   Remove uma credencial do vault
-lumn credential export         Exporta o vault criptografado de forma portável
-lumn credential import <file>  Importa um vault exportado
+```
+── Execução e desenvolvimento ──────────────────────────────────────────────────
 
-lumn daemon start              Inicia o daemon em background
-lumn daemon stop               Para o daemon graciosamente
-lumn daemon status             Exibe saúde do daemon e workflows ativos
+lumn run                          Executa lumn.lua do diretório atual (uma vez,
+                                  sem daemon, logs no terminal — modo dev)
+lumn run <id|name>                Prioridade: 1º daemon (instância registrada),
+                                  2º pasta local, 3º arquivo .lua.
+                                  Com daemon: executa fora do trigger, útil para teste manual
+lumn run -f <arquivo|pasta>       Força execução de arquivo/pasta local (ignora daemon)
 
-lumn ui                        Abre a Web UI no browser padrão
-lumn mcp                       Inicia o servidor MCP (stdio por padrão)
-lumn mcp --transport sse       Inicia o MCP em modo SSE (para integrações HTTP)
+lumn validate                     Valida sintaxe Lua e DAG sem executar
+lumn validate -f <arquivo|pasta>  Valida arquivo/pasta específico
 
-lumn deploy                    Empacota tudo em imagem Docker versionada
-lumn bundle                    Cria artifact portável (.tar.gz) para deploy manual
+── Ciclo de vida no daemon ──────────────────────────────────────────────────────
+
+lumn start [name]                 Registra lumn.lua no daemon
+                                  name: nome do workflow (padrão: nome da pasta atual)
+
+lumn start [name] -f <alvo>       Registra arquivo ou pasta específica
+                                  alvo pode ser: arquivo.lua ou pasta/
+
+lumn start [name:tag]             Registra com tag de versão (ex: cancelamentos:1.2)
+                                  Sem tag, registra como :latest
+
+lumn stop <id|name>               Para a execução do workflow (desativa triggers)
+lumn delete <id|name>             Remove o workflow do daemon permanentemente
+lumn restart <id|name>            Para e reinicia (aplica mudanças no arquivo)
+
+── Observabilidade ─────────────────────────────────────────────────────────────
+
+lumn list                         Tabela de todos os workflows no daemon:
+                                  ID · NAME · VERSION · STATUS · LAST RUN · FAILS · NEXT RUN
+
+lumn logs                         Stream de logs de todos os workflows em tempo real
+                                  (comportamento pm2 logs — segue continuamente, Ctrl+C para sair)
+lumn logs <id|name>               Stream do workflow específico
+lumn logs --lines <n>             Exibe as últimas N linhas antes de seguir (padrão: 15)
+lumn logs <id|name> --no-follow   Exibe logs históricos sem seguir (modo batch)
+lumn logs <id|name> --since 1h    Filtra por janela de tempo
+lumn logs <id|name> --level error Filtra por nível (debug|info|warn|error)
+lumn logs <id|name> --step <nome> Logs de um step específico do flow
+
+lumn watch                        TUI de todos os workflows ativos (Q para sair)
+lumn watch <id|name>              TUI do workflow específico:
+                                  · Painel superior: estado do DAG em ASCII (nodes por status)
+                                  · Painel inferior: stream de logs em tempo real
+                                  · Itens em processamento por step: [pipe:sap] 12/50
+
+── Plugins ──────────────────────────────────────────────────────────────────────
+
+lumn plugin add <ref>             Instala plugin
+                                  Formatos: pretodev/outlook
+                                            pretodev/plugins/outlook
+                                            pretodev/outlook@v2.1.0
+                                            gitlab.com/usuario/plugin
+lumn plugin remove <nome>         Desinstala plugin
+lumn plugin list                  Lista plugins instalados com versão e namespace
+lumn plugin update                Atualiza todos respeitando o lumn.lock
+
+── Credenciais ──────────────────────────────────────────────────────────────────
+
+lumn credential add <key>         Setup guiado pelo plugin (OAuth, form, API key)
+lumn credential list              Lista chaves (nunca valores)
+lumn credential renew <key>       Renova credencial expirada
+lumn credential remove <key>      Remove do vault
+lumn credential export            Exporta vault criptografado de forma portável
+lumn credential import <file>     Importa vault exportado
+
+── Daemon ───────────────────────────────────────────────────────────────────────
+
+lumn daemon start                 Inicia o daemon em background
+lumn daemon stop                  Para o daemon graciosamente
+lumn daemon status                Saúde do daemon e sumário de workflows ativos
+
+── Interface e integração ───────────────────────────────────────────────────────
+
+lumn ui                           Abre a Web UI no browser padrão
+lumn mcp                          Inicia servidor MCP (stdio)
+lumn mcp --transport sse          Inicia servidor MCP em modo SSE
+
+── Deploy ───────────────────────────────────────────────────────────────────────
+
+lumn deploy                       Empacota em imagem Docker com todos os workflows
+lumn bundle                       Cria artifact .tar.gz para deploy manual
+```
+
+#### Exemplos de `lumn start`
+
+```sh
+# Registra lumn.lua do diretório atual, nome = nome da pasta, versão = latest
+lumn start
+
+# Registra com nome explícito
+lumn start cancelamentos
+
+# Registra com tag de versão
+lumn start cancelamentos:1.2
+
+# Registra arquivo específico com nome e tag
+lumn start cancelamentos:1.2 -f cancelamentos.lua
+
+# Registra pasta específica
+lumn start pedidos -f order_cancel/
+
+# Em um CI: registrar a pasta atual com a versão da build
+lumn start meu-app:${BUILD_TAG} -f .
+```
+
+#### Exemplos de `lumn run`
+
+```sh
+# Executa lumn.lua do diretório atual (modo dev)
+lumn run
+
+# Executa uma instância registrada no daemon (fora do trigger)
+lumn run cancelamentos
+lumn run a3f92c1b  # por ID
+
+# Executa arquivo ou pasta específica (modo dev)
+lumn run -f order_cancel/
+lumn run -f cancelamento.lua
 ```
 
 ### O daemon (`lumnd`)
@@ -954,34 +1113,52 @@ O daemon é o processo que mantém a plataforma viva. Ele:
 
 O daemon é projetado para ser leve. Em um ambiente com dezenas de workflows, consome menos de 50MB de RAM em idle. Não existe um cluster de workers — o paralelismo é gerenciado por goroutines dentro do processo único.
 
+### `lumn list` — saída esperada
+
+```
+ID        NAME             VERSION    STATUS    LAST RUN          FAILS  NEXT RUN
+a3f92c1b  cancelamentos    1.2        running   2025-03-29 08:15  0      —
+b71d40e2  customer-sync    latest     idle      2025-03-29 07:00  2      09:00
+c99a1f33  inventory-alert  latest     stopped   2025-03-28 23:00  0      —
+```
+
+Campos: `ID` (hash curto), `NAME`, `VERSION` (tag ou `latest`), `STATUS` (`running` · `idle` · `stopped` · `error`), `LAST RUN` (timestamp da última execução), `FAILS` (falhas acumuladas desde o último deploy), `NEXT RUN` (próxima execução agendada para schedulers).
+
+### `lumn watch` — comportamento
+
+`lumn watch` e `lumn watch <id|name>` abrem uma TUI (terminal user interface) em tempo real. A distinção em relação ao `lumn logs` é que o watch mostra o estado do DAG além dos logs — é o equivalente terminal da Web UI.
+
+- Painel superior: estado do DAG em ASCII, nodes coloridos por status (aguardando · executando · concluído · erro)
+- Painel inferior: stream de logs em tempo real do(s) workflow(s)
+- Contadores por step visíveis durante execuções ativas: `[pipe:sap-customer] 12/50 items`
+- `Q` sai do watch sem afetar nenhum workflow em execução
+
 ### Ciclo de desenvolvimento local
 
 ```sh
-# Criar um novo workflow
-lumn init order_cancel
-cd order_cancel
+# 1. Criar projeto
+mkdir order_cancel && cd order_cancel
+# Criar lumn.lua manualmente ou copiar de um template existente
 
-# Adicionar os plugins necessários
+# 2. Adicionar plugins e credenciais
 lumn plugin add lumn/outlook
-lumn plugin add lumn/openai
-
-# Configurar credenciais (fluxo guiado pelo plugin)
 lumn credential add outlook
-lumn credential add openai
 
-# Desenvolver o init.lua...
-# Testar sem daemon (execução única, logs no terminal)
-lumn run order_cancel/
+# 3. Desenvolver (editar lumn.lua)
+# Testar localmente — execução única, logs no terminal
+lumn run
 
-# Validar DAG e sintaxe
-lumn validate order_cancel/
+# Validar DAG antes de subir
+lumn validate
 
-# Subir daemon e ativar o workflow
+# 4. Subir para o daemon
 lumn daemon start
-lumn start order_cancel/
+lumn start cancelamentos:1.0
 
-# Monitorar
-lumn ui
+# 5. Monitorar
+lumn logs cancelamentos        # stream de logs, Ctrl+C para sair
+lumn watch cancelamentos       # TUI com DAG + logs
+lumn ui                        # Web UI no browser
 ```
 
 ---
