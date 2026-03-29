@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/pretodev/lumn/internal/executor"
@@ -196,6 +197,15 @@ func (s *Store) ResolveWorkflowSelector(selector string) (Workflow, bool, error)
 		return workflow, found, err
 	}
 
+	workflow, found, err = s.resolveWorkflowByName(selector)
+	if err != nil || found {
+		return workflow, found, err
+	}
+
+	return s.resolveWorkflowByIDPrefix(selector)
+}
+
+func (s *Store) resolveWorkflowByName(selector string) (Workflow, bool, error) {
 	rows, err := s.db.QueryContext(
 		context.Background(),
 		`SELECT id, name, version, path, status, created_at, updated_at
@@ -227,6 +237,50 @@ ORDER BY CASE WHEN version = 'latest' THEN 0 ELSE 1 END, updated_at DESC, id`,
 		return matches[0], true, nil
 	}
 	return Workflow{}, false, fmt.Errorf("workflow %q is ambiguous; use the workflow id", selector)
+}
+
+func (s *Store) resolveWorkflowByIDPrefix(selector string) (Workflow, bool, error) {
+	rows, err := s.db.QueryContext(
+		context.Background(),
+		`SELECT id, name, version, path, status, created_at, updated_at
+FROM workflows
+WHERE id LIKE ?1 || '%'
+ORDER BY id`,
+		selector,
+	)
+	if err != nil {
+		return Workflow{}, false, err
+	}
+	defer rows.Close()
+
+	matches := make([]Workflow, 0, 4)
+	for rows.Next() {
+		workflow, err := scanWorkflow(rows)
+		if err != nil {
+			return Workflow{}, false, err
+		}
+		matches = append(matches, workflow)
+	}
+	if err := rows.Err(); err != nil {
+		return Workflow{}, false, err
+	}
+
+	switch len(matches) {
+	case 0:
+		return Workflow{}, false, nil
+	case 1:
+		return matches[0], true, nil
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, workflow := range matches {
+			ids = append(ids, workflow.ID)
+		}
+		return Workflow{}, false, fmt.Errorf(
+			"workflow id prefix %q is ambiguous; matches %s",
+			selector,
+			strings.Join(ids, ", "),
+		)
+	}
 }
 
 func (s *Store) CountFailedExecutionsSince(workflowID string, since time.Time) (int, error) {

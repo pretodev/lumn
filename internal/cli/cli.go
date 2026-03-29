@@ -23,13 +23,22 @@ import (
 
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printUsage(stderr)
+		printMainHelp(stderr)
 		return int(errkind.ErrGeneric)
+	}
+
+	if isHelpToken(args[0]) {
+		printMainHelp(stdout)
+		return int(errkind.OK)
+	}
+
+	if args[0] == "help" {
+		return runHelpCommand(args[1:], stdout, stderr)
 	}
 
 	switch args[0] {
 	case "validate":
-		return runValidateCommand(args[1:], stderr)
+		return runValidateCommand(args[1:], stdout, stderr)
 	case "run":
 		return runRunCommand(args[1:], stdout, stderr)
 	case "start":
@@ -55,12 +64,36 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "daemon":
 		return runDaemonCommand(args[1:], stdout, stderr)
 	default:
-		printUsage(stderr)
+		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
+		printMainHelp(stderr)
 		return int(errkind.ErrGeneric)
 	}
 }
 
-func runValidateCommand(args []string, stderr io.Writer) int {
+func runHelpCommand(args []string, stdout, stderr io.Writer) int {
+	topic, err := parseHelpTopic(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+	if topic == "" {
+		printMainHelp(stdout)
+		return int(errkind.OK)
+	}
+	if !printHelpTopic(stdout, topic) {
+		fmt.Fprintf(stderr, "unknown help topic %q\n\n", topic)
+		printMainHelp(stderr)
+		return int(errkind.ErrGeneric)
+	}
+	return int(errkind.OK)
+}
+
+func runValidateCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printValidateHelp(stdout)
+		return int(errkind.OK)
+	}
+
 	target, err := parseValidateArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -74,6 +107,11 @@ func runValidateCommand(args []string, stderr io.Writer) int {
 }
 
 func runRunCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printRunHelp(stdout)
+		return int(errkind.OK)
+	}
+
 	selector, forcedTarget, err := parseRunArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -122,6 +160,11 @@ func runRunCommand(args []string, stdout, stderr io.Writer) int {
 }
 
 func runStartCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printStartHelp(stdout)
+		return int(errkind.OK)
+	}
+
 	nameArg, targetArg, err := parseStartArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -168,8 +211,13 @@ func runSelectorMutation(
 	command string,
 	run func(client *daemon.Client, selector string) (daemonapi.WorkflowMutationResponse, error),
 ) int {
+	if hasHelpFlag(args) {
+		printSelectorCommandHelp(stdout, command)
+		return int(errkind.OK)
+	}
+
 	if len(args) != 1 || strings.HasPrefix(args[0], "-") {
-		fmt.Fprintf(stderr, "usage: lumn %s <id|name>\n", command)
+		fmt.Fprintln(stderr, usageError(command, "expected exactly one workflow selector"))
 		return int(errkind.ErrGeneric)
 	}
 
@@ -190,8 +238,13 @@ func runSelectorMutation(
 }
 
 func runListCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printListHelp(stdout)
+		return int(errkind.OK)
+	}
+
 	if len(args) != 0 {
-		fmt.Fprintln(stderr, "usage: lumn list")
+		fmt.Fprintln(stderr, usageError("list", "list does not accept positional arguments"))
 		return int(errkind.ErrGeneric)
 	}
 
@@ -212,6 +265,11 @@ func runListCommand(args []string, stdout, stderr io.Writer) int {
 }
 
 func runWatchCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printWatchHelp(stdout)
+		return int(errkind.OK)
+	}
+
 	selector, err := parseOptionalSelector(args, "watch")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -238,6 +296,11 @@ func runWatchCommand(args []string, stdout, stderr io.Writer) int {
 }
 
 func runLogsCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printLogsHelp(stdout)
+		return int(errkind.OK)
+	}
+
 	selector, err := parseLogsArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -265,14 +328,23 @@ func runLogsCommand(args []string, stdout, stderr io.Writer) int {
 
 func runDaemonCommand(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: lumn daemon <start|stop|status>")
+		printDaemonHelp(stderr)
 		return int(errkind.ErrGeneric)
+	}
+
+	if isHelpToken(args[0]) {
+		printDaemonHelp(stdout)
+		return int(errkind.OK)
 	}
 
 	switch args[0] {
 	case "start":
+		if hasHelpFlag(args[1:]) {
+			printDaemonStartHelp(stdout)
+			return int(errkind.OK)
+		}
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: lumn daemon start")
+			fmt.Fprintln(stderr, usageError("daemon start", "daemon start does not accept additional arguments"))
 			return int(errkind.ErrGeneric)
 		}
 		if err := startDaemonProcess(); err != nil {
@@ -282,8 +354,12 @@ func runDaemonCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "daemon started")
 		return int(errkind.OK)
 	case "stop":
+		if hasHelpFlag(args[1:]) {
+			printDaemonStopHelp(stdout)
+			return int(errkind.OK)
+		}
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: lumn daemon stop")
+			fmt.Fprintln(stderr, usageError("daemon stop", "daemon stop does not accept additional arguments"))
 			return int(errkind.ErrGeneric)
 		}
 		client, err := newDaemonClient()
@@ -298,8 +374,12 @@ func runDaemonCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "daemon stopped")
 		return int(errkind.OK)
 	case "status":
+		if hasHelpFlag(args[1:]) {
+			printDaemonStatusHelp(stdout)
+			return int(errkind.OK)
+		}
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: lumn daemon status")
+			fmt.Fprintln(stderr, usageError("daemon status", "daemon status does not accept additional arguments"))
 			return int(errkind.ErrGeneric)
 		}
 		client, err := newDaemonClient()
@@ -315,7 +395,8 @@ func runDaemonCommand(args []string, stdout, stderr io.Writer) int {
 		renderDaemonStatus(stdout, health)
 		return int(errkind.OK)
 	default:
-		fmt.Fprintln(stderr, "usage: lumn daemon <start|stop|status>")
+		fmt.Fprintf(stderr, "unknown daemon command %q\n\n", args[0])
+		printDaemonHelp(stderr)
 		return int(errkind.ErrGeneric)
 	}
 }
@@ -437,17 +518,13 @@ func orDash(value string) string {
 	return value
 }
 
-func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: lumn <validate|run|start|stop|delete|restart|list|watch|logs|daemon>")
-}
-
 func parseValidateArgs(args []string) (string, error) {
 	target, positionals, err := extractTargetFlag(args)
 	if err != nil {
-		return "", err
+		return "", usageError("validate", err.Error())
 	}
 	if len(positionals) != 0 {
-		return "", errors.New("usage: lumn validate [-f <arquivo|pasta>]")
+		return "", usageError("validate", "validate accepts no positional arguments")
 	}
 	return target, nil
 }
@@ -455,13 +532,13 @@ func parseValidateArgs(args []string) (string, error) {
 func parseRunArgs(args []string) (string, string, error) {
 	target, positionals, err := extractTargetFlag(args)
 	if err != nil {
-		return "", "", err
+		return "", "", usageError("run", err.Error())
 	}
 	if len(positionals) > 1 {
-		return "", "", errors.New("usage: lumn run [id|name] | lumn run -f <arquivo|pasta>")
+		return "", "", usageError("run", "run accepts at most one workflow selector")
 	}
 	if target != "" && len(positionals) > 0 {
-		return "", "", errors.New("usage: lumn run [id|name] | lumn run -f <arquivo|pasta>")
+		return "", "", usageError("run", "selector and -f cannot be used together")
 	}
 	if len(positionals) == 1 {
 		return positionals[0], target, nil
@@ -472,10 +549,10 @@ func parseRunArgs(args []string) (string, string, error) {
 func parseStartArgs(args []string) (string, string, error) {
 	target, positionals, err := extractTargetFlag(args)
 	if err != nil {
-		return "", "", err
+		return "", "", usageError("start", err.Error())
 	}
 	if len(positionals) > 1 {
-		return "", "", errors.New("usage: lumn start [name[:tag]] [-f <arquivo|pasta>]")
+		return "", "", usageError("start", "start accepts at most one optional name[:tag] argument")
 	}
 	name := ""
 	if len(positionals) == 1 {
@@ -486,10 +563,10 @@ func parseStartArgs(args []string) (string, string, error) {
 
 func parseOptionalSelector(args []string, command string) (string, error) {
 	if len(args) > 1 {
-		return "", fmt.Errorf("usage: lumn %s [id|name]", command)
+		return "", usageError(command, fmt.Sprintf("%s accepts at most one workflow selector", command))
 	}
 	if len(args) == 1 && strings.HasPrefix(args[0], "-") {
-		return "", fmt.Errorf("usage: lumn %s [id|name]", command)
+		return "", usageError(command, "selectors cannot start with '-'")
 	}
 	if len(args) == 0 {
 		return "", nil
@@ -505,15 +582,15 @@ func parseLogsArgs(args []string) (string, error) {
 		case "--no-follow":
 		case "--lines", "--since", "--level", "--step":
 			if idx+1 >= len(args) {
-				return "", errors.New("usage: lumn logs [id|name] [--lines <n>] [--no-follow] [--since <duration>] [--level <level>] [--step <nome>]")
+				return "", usageError("logs", fmt.Sprintf("flag %s requires a value", arg))
 			}
 			idx++
 		default:
 			if strings.HasPrefix(arg, "--") {
-				return "", errors.New("usage: lumn logs [id|name] [--lines <n>] [--no-follow] [--since <duration>] [--level <level>] [--step <nome>]")
+				return "", usageError("logs", fmt.Sprintf("unknown flag %s", arg))
 			}
 			if selector != "" {
-				return "", errors.New("usage: lumn logs [id|name] [--lines <n>] [--no-follow] [--since <duration>] [--level <level>] [--step <nome>]")
+				return "", usageError("logs", "logs accepts at most one workflow selector")
 			}
 			selector = arg
 		}
@@ -558,4 +635,380 @@ func splitNameVersion(raw string) (string, string) {
 func inferSelectorName(selector string) string {
 	base := filepath.Base(filepath.Clean(selector))
 	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+func isHelpToken(value string) bool {
+	return value == "-h" || value == "--help"
+}
+
+func hasHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if isHelpToken(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+func usageError(command, message string) error {
+	return fmt.Errorf("%s\n\nSee 'lumn %s --help' for usage details.", message, command)
+}
+
+func parseHelpTopic(args []string) (string, error) {
+	switch len(args) {
+	case 0:
+		return "", nil
+	case 1:
+		return args[0], nil
+	case 2:
+		if args[0] == "daemon" {
+			return "daemon " + args[1], nil
+		}
+	default:
+	}
+	return "", errors.New("usage: lumn help [command]")
+}
+
+func printHelpTopic(w io.Writer, topic string) bool {
+	switch topic {
+	case "validate":
+		printValidateHelp(w)
+	case "run":
+		printRunHelp(w)
+	case "start":
+		printStartHelp(w)
+	case "stop":
+		printStopHelp(w)
+	case "delete":
+		printDeleteHelp(w)
+	case "restart":
+		printRestartHelp(w)
+	case "list":
+		printListHelp(w)
+	case "watch":
+		printWatchHelp(w)
+	case "logs":
+		printLogsHelp(w)
+	case "daemon":
+		printDaemonHelp(w)
+	case "daemon start":
+		printDaemonStartHelp(w)
+	case "daemon stop":
+		printDaemonStopHelp(w)
+	case "daemon status":
+		printDaemonStatusHelp(w)
+	default:
+		return false
+	}
+	return true
+}
+
+func printMainHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn
+Developer-first workflow runtime for Lua workflows.
+
+Usage:
+  lumn <command> [arguments] [flags]
+  lumn help [command]
+
+Workflow commands:
+  validate    Validate a local workflow file or directory without executing it.
+  run         Execute a workflow locally or trigger a daemon-managed workflow.
+  start       Register a workflow in the daemon.
+  stop        Stop a daemon-managed workflow.
+  delete      Remove a workflow from the daemon permanently.
+  restart     Reload a daemon-managed workflow.
+  list        List workflows registered in the daemon.
+  watch       Open the live workflow TUI (currently a placeholder).
+  logs        Stream workflow logs (currently a placeholder).
+
+Daemon commands:
+  daemon start    Launch the daemon in the background.
+  daemon stop     Shut the daemon down gracefully.
+  daemon status   Show daemon health information.
+
+Selectors:
+  Commands that accept <id|name> support:
+    - full workflow IDs
+    - unique workflow ID prefixes
+    - workflow names
+  If a name matches multiple versions, the workflow tagged "latest" wins.
+
+Entrypoint resolution:
+  lumn run / lumn validate
+      Load ./lumn.lua from the current directory.
+  lumn run -f <directory>
+      Load <directory>/init.lua, then <directory>/lumn.lua.
+  lumn run <selector>
+      Try the daemon first, then a local directory, then <selector>.lua.
+
+Use "lumn <command> --help" for command-specific guidance.
+`)
+}
+
+func printValidateHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn validate
+Validate a workflow file or directory without running it.
+
+Usage:
+  lumn validate
+  lumn validate -f <file|directory>
+
+Resolution:
+  Without -f, validate loads ./lumn.lua in the current directory.
+  With -f <directory>, validate resolves <directory>/init.lua first,
+  then <directory>/lumn.lua.
+  With -f <file>, validate uses the exact file you provided.
+
+Examples:
+  lumn validate
+  lumn validate -f ./lumn.lua
+  lumn validate -f ./workflows/order_cancel
+`)
+}
+
+func printRunHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn run
+Execute a workflow locally or trigger a daemon-managed workflow.
+
+Usage:
+  lumn run
+  lumn run <id|name>
+  lumn run -f <file|directory>
+
+Behavior:
+  Without arguments, run loads ./lumn.lua and executes it locally.
+  With -f, run executes the given local file or directory and skips the daemon.
+  With <id|name>, run tries the daemon first. If the daemon is unavailable or
+  the workflow is not registered there, run falls back to local resolution:
+    1. local directory
+    2. local .lua file (<selector>.lua)
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Examples:
+  lumn run
+  lumn run sales-report
+  lumn run a1b2
+  lumn run -f ./workflows/order_cancel
+  lumn run -f ./cancelamentos.lua
+`)
+}
+
+func printStartHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn start
+Register a workflow in the daemon.
+
+Usage:
+  lumn start
+  lumn start [name[:tag]]
+  lumn start [name[:tag]] -f <file|directory>
+
+Behavior:
+  start always resolves a local workflow target and sends it to the daemon.
+  If name is omitted, lumn infers it from the resolved target.
+  If tag is omitted, lumn uses "latest".
+  Starting the same name:tag again updates the existing workflow in place.
+
+Resolution:
+  Without -f, start resolves ./lumn.lua in the current directory.
+  With -f <directory>, start resolves <directory>/init.lua first,
+  then <directory>/lumn.lua.
+  With -f <file>, start uses the exact file you provided.
+
+Examples:
+  lumn start
+  lumn start cancelamentos
+  lumn start cancelamentos:1.2
+  lumn start pedidos -f ./workflows/order_cancel
+  lumn start finance-sync:2026-03 -f ./finance.lua
+`)
+}
+
+func printSelectorCommandHelp(w io.Writer, command string) {
+	switch command {
+	case "stop":
+		printStopHelp(w)
+	case "delete":
+		printDeleteHelp(w)
+	case "restart":
+		printRestartHelp(w)
+	}
+}
+
+func printStopHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn stop
+Stop a daemon-managed workflow and disable its triggers.
+
+Usage:
+  lumn stop <id|name>
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Examples:
+  lumn stop cancelamentos
+  lumn stop a1b2
+`)
+}
+
+func printDeleteHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn delete
+Remove a workflow from the daemon permanently.
+
+Usage:
+  lumn delete <id|name>
+
+Behavior:
+  delete stops the workflow if it is active, clears queued work, removes
+  triggers, and deletes the workflow record from the daemon store.
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Examples:
+  lumn delete cancelamentos
+  lumn delete a1b2
+`)
+}
+
+func printRestartHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn restart
+Reload a daemon-managed workflow from its registered target.
+
+Usage:
+  lumn restart <id|name>
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Examples:
+  lumn restart cancelamentos
+  lumn restart a1b2
+`)
+}
+
+func printListHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn list
+List workflows currently registered in the daemon.
+
+Usage:
+  lumn list
+
+Columns:
+  ID         Generated workflow ID.
+  NAME       Runtime workflow name.
+  VERSION    Runtime version tag, or "latest".
+  STATUS     Current daemon status.
+  LAST RUN   Timestamp of the most recent execution.
+  FAILS      Number of failed executions since the last workflow update.
+  NEXT RUN   Next scheduled execution time, when available.
+
+Example:
+  lumn list
+`)
+}
+
+func printWatchHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn watch
+Open the live workflow TUI.
+
+Usage:
+  lumn watch
+  lumn watch <id|name>
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Status:
+  The command is registered and validates daemon connectivity, but the
+  interactive TUI is still a placeholder in the current implementation.
+`)
+}
+
+func printLogsHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn logs
+Stream workflow logs from the daemon.
+
+Usage:
+  lumn logs
+  lumn logs <id|name>
+  lumn logs [<id|name>] [--lines <n>] [--no-follow] [--since <duration>] [--level <level>] [--step <name>]
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Flags:
+  --lines <n>       Show the last n lines before following.
+  --no-follow       Print historical logs only.
+  --since <dur>     Filter logs newer than the given duration.
+  --level <level>   Filter by log level.
+  --step <name>     Filter to a specific workflow step.
+
+Status:
+  The command is registered and validates daemon connectivity, but log streaming
+  is still a placeholder in the current implementation.
+`)
+}
+
+func printDaemonHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn daemon
+Manage the local lumn daemon process.
+
+Usage:
+  lumn daemon <subcommand>
+
+Subcommands:
+  start     Launch the daemon in the background.
+  stop      Stop the daemon gracefully.
+  status    Show daemon health information.
+
+Examples:
+  lumn daemon start
+  lumn daemon stop
+  lumn daemon status
+`)
+}
+
+func printDaemonStartHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn daemon start
+Launch the daemon in the background.
+
+Usage:
+  lumn daemon start
+
+Behavior:
+  start writes daemon logs to the configured state directory and waits until the
+  daemon health endpoint becomes reachable.
+`)
+}
+
+func printDaemonStopHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn daemon stop
+Stop the daemon gracefully.
+
+Usage:
+  lumn daemon stop
+
+Behavior:
+  stop asks the running daemon to shut down cleanly, stopping triggers and
+  waiting for in-flight executions to finish within the shutdown timeout.
+`)
+}
+
+func printDaemonStatusHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn daemon status
+Show daemon health information.
+
+Usage:
+  lumn daemon status
+
+Output:
+  running          Whether the daemon responds to health checks.
+  transport        Socket or pipe used by the CLI.
+  webhook_port     Local HTTP port for webhook triggers.
+  active_workflows Number of active workflows currently loaded.
+  uptime_seconds   Daemon uptime in seconds.
+`)
 }

@@ -212,8 +212,60 @@ func TestRemovedCommandsAreUnavailable(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("%v exit = %d, want 1", args, code)
 		}
-		if !strings.Contains(stderr, "usage: lumn") {
+		if !strings.Contains(stderr, "unknown command") || !strings.Contains(stderr, "Workflow commands:") {
 			t.Fatalf("%v stderr = %q", args, stderr)
+		}
+	}
+}
+
+func TestMainHelpIsStructuredAndInEnglish(t *testing.T) {
+	t.Parallel()
+
+	code, stdout, stderr := runCLI(t, "help")
+	if code != 0 {
+		t.Fatalf("help exit = %d, stderr = %q", code, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	if !strings.Contains(stdout, "Workflow commands:") || !strings.Contains(stdout, "Selectors:") || !strings.Contains(stdout, "Entrypoint resolution:") {
+		t.Fatalf("unexpected help output: %q", stdout)
+	}
+}
+
+func TestCommandHelpIsAvailableViaHelpFlag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		args    []string
+		matches []string
+	}{
+		{
+			args:    []string{"run", "--help"},
+			matches: []string{"lumn run", "Usage:", "Selectors:", "Examples:"},
+		},
+		{
+			args:    []string{"logs", "--help"},
+			matches: []string{"lumn logs", "Flags:", "Status:"},
+		},
+		{
+			args:    []string{"help", "daemon", "start"},
+			matches: []string{"lumn daemon start", "Behavior:"},
+		},
+	}
+
+	for _, tc := range tests {
+		code, stdout, stderr := runCLI(t, tc.args...)
+		if code != 0 {
+			t.Fatalf("%v exit = %d, stderr = %q", tc.args, code, stderr)
+		}
+		if stderr != "" {
+			t.Fatalf("%v stderr = %q", tc.args, stderr)
+		}
+		for _, match := range tc.matches {
+			if !strings.Contains(stdout, match) {
+				t.Fatalf("%v expected %q in output %q", tc.args, match, stdout)
+			}
 		}
 	}
 }

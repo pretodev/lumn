@@ -139,6 +139,47 @@ return {
 	}
 }
 
+func TestDaemonSelectorsAcceptUniqueIDPrefixes(t *testing.T) {
+	t.Parallel()
+
+	_, client, _ := newTestDaemon(t)
+
+	workflowDir := filepath.Join(t.TempDir(), "prefix")
+	writeWorkflow(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = lumn.test_source({ { id = 1 } }),
+      on_data = function(result)
+        return result
+      end,
+    },
+  }
+}
+`)
+
+	startResp, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Name:   "prefix-test",
+		Target: workflowDir,
+	})
+	if err != nil {
+		t.Fatalf("start workflow: %v", err)
+	}
+
+	prefix := startResp.WorkflowID[:4]
+	status, err := client.WorkflowStatus(context.Background(), prefix)
+	if err != nil {
+		t.Fatalf("status by prefix: %v", err)
+	}
+	if status.Workflow.ID != startResp.WorkflowID {
+		t.Fatalf("unexpected workflow: %+v", status.Workflow)
+	}
+
+	if _, err := client.StopWorkflow(context.Background(), prefix); err != nil {
+		t.Fatalf("stop by prefix: %v", err)
+	}
+}
+
 func TestDaemonDeleteRemovesWorkflow(t *testing.T) {
 	t.Parallel()
 

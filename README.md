@@ -173,6 +173,8 @@ Observacoes:
 - `lumn start` exige o daemon ativo.
 - `lumn watch` e `lumn logs` ja estao registrados na CLI, mas ainda retornam placeholder.
 - `lumn list` mostra `ID`, `NAME`, `VERSION`, `STATUS`, `LAST RUN`, `FAILS` e `NEXT RUN`.
+- seletores `<id|name>` aceitam ID completo, prefixo unico de ID ou nome do workflow.
+- use `lumn help <command>` ou `lumn <command> --help` para a documentacao detalhada de cada comando.
 
 ## DSL minima
 
