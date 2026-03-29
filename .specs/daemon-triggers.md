@@ -4,44 +4,54 @@ branch: claude/feature/daemon-triggers
 
 ## Summary
 
-Implementar o daemon (`lumnd`) como processo background responsavel por manter workflows ativos, gerenciar triggers e executar workflows sob demanda. A CLI (`lumn`) se comunica com o daemon via API HTTP local para registrar, listar, executar e parar workflows.
+Implementar o daemon (`lumnd`) como processo background responsavel por manter workflows ativos, gerenciar triggers e executar workflows sob demanda. A CLI (`lumn`) se comunica com o daemon via API HTTP sobre transporte nativo da plataforma (Unix socket em Linux/macOS, named pipe em Windows) para registrar, listar, executar e parar workflows.
 
-Esta fase introduz quatro tipos de trigger — scheduler, webhook, file watcher e execucao direta — e os comandos CLI necessarios para operar o daemon: `start`, `stop`, `status`, `exec`, `daemon start`, `daemon stop` e `daemon status`.
+Esta fase introduz quatro tipos de trigger — scheduler, webhook, file watcher e execucao direta — e os comandos CLI necessarios para operar o daemon: `start`, `stop`, `restart`, `status`, `exec`, `daemon start`, `daemon stop` e `daemon status`.
 
-O daemon persiste workflows registrados e estado de execucao em SQLite, garantindo que workflows sobrevivam a restarts do processo. A arquitetura segue o modelo do Docker: o daemon e o runtime de execucao e a CLI e apenas um client que se comunica com ele.
+O daemon persiste workflows registrados e estado de execucao em SQLite, garantindo que workflows sobrevivam a restarts do processo. A arquitetura segue o modelo do Docker: o daemon e o runtime de execucao e a CLI e apenas um client que se comunica com ele. A comunicacao CLI-Daemon replica o padrao do Docker — protocolo HTTP sobre transporte nativo do SO.
 
 ## Decisions
 
-- **Comunicacao CLI-Daemon via API HTTP local** — usamos `http://localhost:<porta>` em vez de socket Unix. Motivo: compatibilidade nativa com Windows (named pipes exigiriam abstracoes extras) e com todas as plataformas sem codigo condicional. HTTP tambem facilita debug (curl, browser) e e a mesma tecnologia que o daemon ja precisara para servir webhooks. A porta padrao sera configuravel (default: `6890`).
+- **Comunicacao CLI-Daemon via HTTP sobre transporte nativo do SO (modelo Docker)** — o protocolo e HTTP, mas o transporte e nativo da plataforma: Unix socket (`~/.lumn/lumnd.sock`) em Linux/macOS e named pipe (`\\.\pipe\lumnd`) em Windows. Esse e exatamente o modelo do Docker: `docker.sock` em Linux/macOS, `//./pipe/docker_engine` em Windows, com HTTP como protocolo sobre ambos. Go suporta isso nativamente via custom `net.Dialer` no `http.Client` — sem bibliotecas extras. Vantagens sobre TCP puro: sem conflito de porta, sem exposicao acidental na rede, e permissoes de acesso controladas pelo filesystem. O servidor HTTP de webhooks continua em TCP (`localhost:6890`) por ser externo.
 - **Persistencia em SQLite via modernc/sqlite** — sem CGo, conforme o Documento de Visao. Workflows registrados, estado de triggers e fila de execucao sao persistidos. Um restart do daemon restaura automaticamente todos os workflows ativos.
 - **Webhook sem autenticacao nesta fase** — o servidor HTTP de webhooks roda em localhost. HMAC-SHA256 fica para fase futura quando secrets estiverem implementados.
 - **`lumn exec` como comando de disparo manual** — separado de `lumn run` (que continua sendo execucao standalone sem daemon). `lumn exec` envia um request ao daemon para disparar o workflow via trigger de execucao direta.
 - **Fila de execucao com enfileiramento** — se um workflow esta em execucao quando o proximo trigger dispara, a execucao e enfileirada (FIFO). Nao ha skip nem execucao paralela do mesmo workflow.
 - **Reutilizacao do engine existente** — o daemon usa `internal/engine` e `internal/executor` como biblioteca para executar workflows. A logica de execucao nao e duplicada.
 - **Sem Web UI nesta fase** — a interface e exclusivamente via CLI.
+- **`lumnd.conf` em Lua** — o arquivo de configuracao do daemon usa Lua, consistente com todo o ecossistema do projeto (workflows sao Lua, config do workspace e Lua). Justificativa: (1) o runtime Lua ja existe no binario — nao adiciona dependencia de parser; (2) permite validacao com as mesmas regras do sandbox; (3) desenvolvedores do lumn ja conhecem a sintaxe; (4) tables Lua sao mais expressivas que TOML/INI para configuracoes aninhadas sem a verbosidade de JSON/YAML. O arquivo retorna uma table, mesmo padrao de `init.lua`.
+- **File watcher com debounce configuravel e default sensato** — debounce padrao de 500ms, configuravel por trigger via campo `debounce` na table do file_watcher. Valor suficiente para agrupar rajadas tipicas de filesystem (editores que fazem write+rename, ou copias de multiplos arquivos).
+- **Retencao de historico com rotacao dual** — rotacao por quantidade (default: 1000 execucoes por workflow) e por tempo (default: 30 dias). O que for atingido primeiro dispara a limpeza. Ambos os limites sao configuraveis em `lumnd.conf`. O default de 30 dias garante visibilidade historica do daemon por periodo operacionalmente relevante.
+- **`lumn restart` incluido nesta fase** — implementado como sequencia atomica de stop + start. Se o stop falhar, o restart aborta e reporta o erro. Se o stop concluir mas o start falhar, o workflow fica parado e o erro e reportado.
+- **Contexto do trigger via `lumn.trigger_data()`** — funcao dedicada no global `lumn` que retorna uma table especifica ao tipo de trigger que disparou a execucao. Cada tipo de trigger produz um objeto proprio: webhook retorna `{ body, headers, method, path }`, file_watcher retorna `{ file, event, path }`, scheduler retorna `{ scheduled_at, fired_at }`, manual retorna `{}`. A funcao e read-only e nao depende de get/set.
+- **Erro explicito quando daemon nao esta rodando (modelo Docker)** — quando a CLI tenta se comunicar com o daemon e a conexao falha (socket/pipe nao existe ou recusa conexao), retorna erro claro: `Cannot connect to the lumn daemon at <path>. Is the daemon running? (lumn daemon start)`. Mesmo padrao do `docker: Cannot connect to the Docker daemon`.
 
 ## Functional Requirements
 
 ### Daemon (`lumnd` / `lumn daemon`)
 
 - `lumn daemon start` inicia o processo `lumnd` em background
-  - O daemon escuta na porta HTTP configuravel (default `6890`)
+  - O daemon escuta em transporte nativo do SO:
+    - Linux/macOS: Unix socket em `~/.lumn/lumnd.sock`
+    - Windows: named pipe em `\\.\pipe\lumnd`
+  - Adicionalmente, inicia servidor HTTP TCP em `localhost:6890` (configuravel) para webhooks
   - Ao iniciar, restaura workflows ativos do SQLite e reativa seus triggers
   - Escreve um PID file para que a CLI saiba se o daemon esta rodando
   - Logs do daemon vao para arquivo em `~/.lumn/lumnd.log` (ou diretorio configuravel)
 - `lumn daemon stop` envia sinal de shutdown gracioso ao daemon
   - Aguarda execucoes em andamento finalizarem (com timeout configuravel)
   - Desativa todos os triggers antes de encerrar
-  - Remove o PID file
+  - Remove o PID file e o socket/pipe
 - `lumn daemon status` exibe informacoes de saude do daemon
   - Se esta rodando ou nao
-  - Porta em uso
+  - Transporte em uso (socket path ou pipe name)
+  - Porta HTTP de webhooks
   - Numero de workflows ativos
   - Uptime
 
 ### API HTTP interna do daemon
 
-O daemon expoe endpoints REST consumidos pela CLI:
+O daemon expoe endpoints REST sobre o transporte nativo (socket/pipe), consumidos pela CLI:
 
 | Endpoint | Metodo | Descricao |
 |----------|--------|-----------|
@@ -49,8 +59,14 @@ O daemon expoe endpoints REST consumidos pela CLI:
 | `/api/v1/workflows` | GET | Lista todos os workflows registrados |
 | `/api/v1/workflows` | POST | Registra um novo workflow (start) |
 | `/api/v1/workflows/:id` | DELETE | Remove workflow do daemon (stop) |
+| `/api/v1/workflows/:id/restart` | POST | Restart do workflow (stop + start atomico) |
 | `/api/v1/workflows/:id/exec` | POST | Dispara execucao via trigger manual |
 | `/api/v1/workflows/:id/status` | GET | Status detalhado de um workflow |
+
+Adicionalmente, o servidor HTTP TCP (`localhost:6890`) expoe:
+
+| Endpoint | Metodo | Descricao |
+|----------|--------|-----------|
 | `/hooks/*path` | ANY | Endpoints de webhook dos workflows |
 
 ### CLI — Novos comandos
@@ -58,11 +74,16 @@ O daemon expoe endpoints REST consumidos pela CLI:
 - **`lumn start <pasta/>`** — Carrega o workflow, valida, registra no daemon e ativa triggers
   - Envia o caminho absoluto do workflow para o daemon via POST `/api/v1/workflows`
   - O daemon carrega o `init.lua`, valida e inicia os triggers
-  - Retorna erro se o daemon nao estiver rodando
+  - Se o daemon nao estiver rodando, retorna: `Cannot connect to the lumn daemon at <socket/pipe>. Is the daemon running? (lumn daemon start)`
   - Retorna erro se o workflow ja estiver registrado
 - **`lumn stop <workflow-id>`** — Desativa triggers e remove o workflow do daemon
   - Envia DELETE para `/api/v1/workflows/:id`
   - Aguarda execucao em andamento (se houver) antes de remover
+- **`lumn restart <workflow-id>`** — Recarrega o workflow (aplica mudancas no init.lua)
+  - Envia POST para `/api/v1/workflows/:id/restart`
+  - Executa stop + start como sequencia atomica
+  - Se o stop falhar, aborta e reporta erro
+  - Se o stop concluir mas o start falhar, workflow fica parado e erro e reportado
 - **`lumn status`** — Lista workflows com estado, tipo de trigger e proxima execucao
   - Formato tabular no terminal
   - Colunas: ID, Version, Status (active/inactive), Trigger, Next Run, Last Run, Last Status
@@ -139,14 +160,23 @@ lumn.triggers.file_watcher {
   pattern = "*.csv",
   event   = "create",
 }
+
+-- Com debounce customizado
+lumn.triggers.file_watcher {
+  path     = "/data/importacoes",
+  pattern  = "*.csv",
+  event    = "create",
+  debounce = "2s",
+}
 ```
 
 - `path` e o diretorio a ser monitorado (caminho absoluto)
 - `pattern` e opcional — filtro glob para nomes de arquivo
 - `event` aceita: `"create"`, `"modify"`, `"delete"`, `"any"` (default: `"any"`)
+- `debounce` e opcional — intervalo para agrupar rajadas de eventos (default: `"500ms"`). Aceita sufixos `ms` e `s`
 - O daemon usa filesystem notifications (fsnotify ou equivalente) para monitorar
-- Ao detectar evento correspondente, enfileira execucao do workflow
-- Informacoes do evento (nome do arquivo, tipo de evento) sao passadas como contexto do trigger
+- Ao detectar evento correspondente, aguarda janela de debounce e enfileira execucao do workflow
+- Informacoes do evento (nome do arquivo, tipo de evento) sao passadas como contexto do trigger via `lumn.trigger_data()`
 
 ### Trigger: Execucao Direta (Manual)
 
@@ -166,6 +196,28 @@ lumn.triggers.manual {}
 - A validacao dos triggers ocorre no momento do `lumn start`, nao no `lumn validate` (pois `validate` e standalone)
 - Triggers invalidos (ex: `interval` e `cron` ao mesmo tempo, path vazio no file_watcher) geram erro de validacao com mensagem clara
 
+### Contexto do trigger via `lumn.trigger_data()`
+
+O workflow acessa informacoes do trigger que disparou a execucao via `lumn.trigger_data()`. A funcao retorna uma table read-only especifica ao tipo de trigger:
+
+```lua
+-- Dentro de qualquer callback do workflow:
+local trigger = lumn.trigger_data()
+```
+
+Retornos por tipo de trigger:
+
+| Trigger | Campos retornados |
+|---------|-------------------|
+| `scheduler` | `{ type = "scheduler", scheduled_at = "ISO8601", fired_at = "ISO8601" }` |
+| `webhook` | `{ type = "webhook", body = table, headers = table, method = "POST", path = "/hooks/..." }` |
+| `file_watcher` | `{ type = "file_watcher", file = "dados.csv", event = "create", path = "/data/importacoes" }` |
+| `manual` | `{ type = "manual" }` |
+
+- A funcao e read-only — modificacoes na table retornada nao afetam o estado interno
+- Chamar `lumn.trigger_data()` fora de uma execucao via daemon (ex: `lumn run`) retorna `{ type = "none" }`
+- Nao depende de `lumn.get`/`lumn.set` — e um mecanismo independente
+
 ### Fila de execucao
 
 - Cada workflow tem sua propria fila FIFO
@@ -173,6 +225,45 @@ lumn.triggers.manual {}
 - Execucoes enfileiradas sao processadas em ordem apos a execucao corrente terminar
 - A fila tem limite configuravel (default: 10). Execucoes alem do limite sao descartadas com log de warning
 - O estado da fila e persistido em SQLite (sobrevive a restarts do daemon)
+
+### Configuracao do daemon (`lumnd.conf`)
+
+O arquivo de configuracao usa Lua, consistente com todo o ecossistema (workflows, config do workspace). Fica em `~/.lumn/lumnd.conf` e retorna uma table:
+
+```lua
+return {
+  -- Porta do servidor HTTP para webhooks (default: 6890)
+  webhook_port = 6890,
+
+  -- Limite da fila de execucao por workflow (default: 10)
+  queue_limit = 10,
+
+  -- Timeout de shutdown em segundos (default: 30)
+  shutdown_timeout = 30,
+
+  -- Retencao de historico de execucoes
+  retention = {
+    max_executions = 1000,  -- por workflow (default: 1000)
+    max_days       = 30,    -- dias (default: 30)
+  },
+
+  -- Nivel de log: "debug", "info", "warn", "error" (default: "info")
+  log_level = "info",
+}
+```
+
+- Se o arquivo nao existir, o daemon usa defaults
+- Campos ausentes usam default individual
+- Campos desconhecidos geram warning no log (nao erro, para forward-compatibility)
+- A validacao do conf usa o mesmo sandbox Lua do projeto
+
+### Retencao de historico de execucoes
+
+- Rotacao dual: por quantidade (default: 1000 por workflow) e por tempo (default: 30 dias)
+- O criterio atingido primeiro dispara a limpeza
+- A limpeza roda periodicamente no daemon (a cada hora) e no startup
+- Ambos os limites sao configuraveis em `lumnd.conf`
+- O default de 30 dias garante visibilidade historica operacionalmente relevante
 
 ### Persistencia (SQLite)
 
@@ -212,6 +303,14 @@ lumn stop <workflow-id>
   → Marca workflow como stopped no SQLite
   → Retorna confirmacao
 
+lumn restart <workflow-id>
+  → CLI envia POST /api/v1/workflows/:id/restart
+  → Daemon executa stop (desativa triggers, aguarda execucao)
+  → Se stop falhou → aborta, retorna erro
+  → Daemon recarrega init.lua do disco, valida, executa start
+  → Se start falhou → workflow fica parado, retorna erro
+  → Retorna confirmacao com triggers atualizados
+
 lumn status
   → CLI envia GET /api/v1/workflows
   → Daemon retorna lista com status de cada workflow e triggers
@@ -223,10 +322,13 @@ lumn status
 ```
 ~/.lumn/
 ├── lumnd.db          SQLite database
+├── lumnd.sock        Unix socket (Linux/macOS)
 ├── lumnd.pid         PID file do processo daemon
 ├── lumnd.log         Log file do daemon
-└── lumnd.conf        Configuracao opcional (porta, limites, etc.)
+└── lumnd.conf        Configuracao Lua (porta, limites, retencao, etc.)
 ```
+
+No Windows, o named pipe `\\.\pipe\lumnd` substitui o socket file (nao aparece no filesystem).
 
 ### Estrutura de codigo proposta
 
@@ -272,8 +374,11 @@ internal/
 - Porta do daemon ja esta em uso por outro processo
 - SQLite database corrompido ou inacessivel
 - File watcher recebe rajada de eventos (debounce necessario)
-- Workflow atualizado no disco enquanto esta registrado no daemon (nao recarrega automaticamente — precisa `lumn stop` + `lumn start`)
+- Workflow atualizado no disco enquanto esta registrado no daemon (nao recarrega automaticamente — precisa `lumn restart`)
 - PID file existe mas processo nao esta rodando (stale PID)
+- `lumnd.conf` com sintaxe Lua invalida — daemon deve iniciar com defaults e logar warning
+- Restart falha no stop — workflow deve permanecer no estado anterior, nao ficar em estado inconsistente
+- Restart falha no start (init.lua com erro) — workflow fica parado com erro claro
 
 ## Acceptance Criteria
 
@@ -282,27 +387,28 @@ internal/
 - `lumn daemon status` reporta saude quando daemon esta rodando e erro claro quando nao esta
 - `lumn start <pasta/>` registra workflow e ativa triggers no daemon
 - `lumn stop <workflow-id>` desativa triggers e remove workflow do daemon
+- `lumn restart <workflow-id>` recarrega workflow do disco e reativa triggers
 - `lumn status` exibe tabela com todos os workflows, seus triggers e estado
 - `lumn exec <workflow-id>` dispara workflow com trigger manual e retorna JSON report
 - Um workflow com `lumn.triggers.scheduler { interval = "15m" }` executa automaticamente a cada 15 minutos
 - Um workflow com `lumn.triggers.scheduler { cron = "..." }` executa no horario correto
 - Um workflow com `lumn.triggers.webhook { path = "/hooks/test" }` executa ao receber POST em `http://localhost:6890/hooks/test`
 - Um workflow com `lumn.triggers.file_watcher { path = "...", event = "create" }` executa ao criar arquivo no diretorio
+- File watcher agrupa rajadas de eventos com debounce de 500ms (default), configuravel por trigger
 - Workflows sem triggers aceitam execucao apenas via `lumn exec`
 - Quando o daemon reinicia, todos os workflows ativos sao restaurados com seus triggers
 - Execucoes sao enfileiradas quando o workflow ja esta em execucao
 - Historico de execucoes e persistido em SQLite e consultavel via `lumn status`
+- Rotacao de historico funciona por quantidade (1000) e por tempo (30 dias), o que for atingido primeiro
+- `lumn.trigger_data()` retorna table especifica ao tipo de trigger que disparou a execucao
+- `lumnd.conf` em Lua e carregado no startup; campos ausentes usam defaults
 - Erros de validacao de trigger geram mensagens claras na CLI
-- O daemon funciona em Windows e Linux sem codigo condicional para comunicacao
+- CLI sem daemon retorna erro claro no modelo Docker: `Cannot connect to the lumn daemon...`
+- Comunicacao CLI-Daemon funciona em Windows (named pipe), Linux e macOS (Unix socket) sem divergencia de protocolo
 
 ## Open Questions
 
-- Estrategia de debounce para file watcher: intervalo fixo (ex: 500ms) ou configuravel por trigger?
-- Limite de retencao do historico de execucoes: rotacionar por quantidade, por data, ou ambos?
-- Formato exato do `lumnd.conf`: Lua (consistente com o projeto), TOML, ou flags de linha de comando?
-- `lumn restart <workflow-id>` deve ser implementado nesta fase ou basta `stop` + `start`?
-- O contexto do trigger (body do webhook, info do file event) deve ser passado para o workflow via qual mecanismo? (candidato: `lumn.trigger_context()` ou campo especial no state)
-- Comportamento quando `lumn start` e chamado e o daemon nao esta rodando: iniciar o daemon automaticamente ou apenas retornar erro?
+Todas as questoes levantadas na versao anterior foram resolvidas. Nao ha open questions pendentes nesta fase.
 
 ## Testing Guidelines
 
@@ -363,10 +469,25 @@ Scenario: Daemon restaura workflows apos restart
   Then "lumn status" mostra "pedidos" como active
   And o scheduler e reativado com o proximo horario correto
 
+Scenario: Restart recarrega workflow do disco
+  Given o daemon esta rodando com workflow "pedidos" ativo
+  And o desenvolvedor altera o init.lua de "pedidos" (ex: muda interval de 15m para 30m)
+  When o desenvolvedor executa "lumn restart pedidos"
+  Then o workflow e parado e reiniciado com a nova configuracao
+  And "lumn status" mostra o novo intervalo de 30m
+
+Scenario: Acessar contexto do trigger via lumn.trigger_data()
+  Given o daemon esta rodando
+  And um workflow usa lumn.trigger_data() dentro de um set.to callback
+  And o workflow tem trigger webhook { path = "/hooks/data" }
+  When uma requisicao POST com body JSON e enviada para o webhook
+  Then lumn.trigger_data() retorna table com type="webhook", body, headers, method e path
+  And o workflow consegue usar os dados do body no processamento
+
 Scenario: Erro ao usar CLI sem daemon rodando
   Given o daemon nao esta rodando
   When o desenvolvedor executa "lumn start pedidos/"
-  Then o stderr mostra mensagem indicando que o daemon nao esta rodando
+  Then o stderr mostra "Cannot connect to the lumn daemon" com instrucao para iniciar
   And o exit code e diferente de 0
 
 Scenario: Rejeitar trigger com configuracao invalida
