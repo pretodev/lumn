@@ -1,19 +1,19 @@
 # lumn
 
-`lumn` e um engine de workflows em Lua, embutido em Go, com sandbox e uma DSL minima baseada em pipeline.
+`lumn` é um engine de workflows em Lua, embutido em Go, com sandbox e uma DSL mínima baseada em pipeline.
 
-O estado atual do projeto cobre a fase `engine-core`, alinhada ao subconjunto ja implementado do Documento de Visao:
+O estado atual do projeto cobre a fase `engine-core`, alinhada ao subconjunto já implementado do Documento de Visão:
 
 - VM Lua embutida via `github.com/speedata/go-lua`
-- sandbox para bloquear I/O e execucao arbitraria
-- `require` restrito a modulos locais do workflow e ao `_shared/` do workspace resolvido
+- sandbox para bloquear I/O e execução arbitrária
+- `require` restrito a módulos locais do workflow e ao `_shared/` do workspace resolvido
 - primitivos suportados: `call`, `set`, `filter` e `tap`
-- estado global da execucao via `lumn.get("chave")` e `lumn.set("chave", valor)`
+- estado global da execução via `lumn.get("chave")` e `lumn.set("chave", valor)`
 - callable builtin `lumn.test_source(items)`
 - CLI com `init`, `validate` e `run`
-- saida estruturada em JSON no `stdout`
+- saída estruturada em JSON no `stdout`
 
-Mais contexto de produto esta em [docs/index.md](docs/index.md). A especificacao implementada nesta fase esta em [.specs/engine-core.md](.specs/engine-core.md).
+Mais contexto de produto está em [docs/index.md](docs/index.md). A especificação implementada nesta fase está em [.specs/engine-core.md](.specs/engine-core.md).
 
 ## Requisitos
 
@@ -24,7 +24,7 @@ Mais contexto de produto esta em [docs/index.md](docs/index.md). A especificacao
 Instalar a CLI localmente a partir do checkout:
 
 ```bash
-go install .
+go install ./cmd/lumn
 ```
 
 Ou via `make`:
@@ -53,7 +53,7 @@ Rodar a suite:
 make test
 ```
 
-Tambem funciona:
+Também funciona:
 
 ```bash
 go test ./...

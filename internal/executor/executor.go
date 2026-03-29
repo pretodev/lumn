@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/pretodev/lumn/internal/dag"
+	luaenv "github.com/pretodev/lumn/internal/lua"
 	"github.com/pretodev/lumn/pkg/errkind"
 	"github.com/pretodev/lumn/pkg/primitive"
 	golua "github.com/speedata/go-lua"
@@ -41,10 +42,12 @@ func Run(workflow *dag.Workflow) (Report, error) {
 
 	rt := workflow.Runtime
 	stateRef := rt.NewTableRef()
+	defer rt.DeleteRef(stateRef)
 	rt.SetExecutionState(stateRef)
 	defer rt.SetExecutionState("")
 
 	items := []itemState{}
+	defer deleteItemRefs(rt, items)
 
 	for _, node := range workflow.Nodes {
 		switch node.Kind {
@@ -63,16 +66,21 @@ func Run(workflow *dag.Workflow) (Report, error) {
 					Callable:  node.CallableName,
 				}
 			}
+			defer rt.DeleteRef(sourceRef)
 
 			sourceLen := rt.TableLen(sourceRef)
+			deleteItemRefs(rt, items)
 			items = make([]itemState, 0, sourceLen)
 			for i := 1; i <= sourceLen; i++ {
 				resultRef := rt.ArrayValueRef(sourceRef, i)
 				refs, err := rt.CallFunction(node.OnDataRef, 1, resultRef)
+				rt.DeleteRef(resultRef)
 				if err != nil {
+					deleteRefs(rt, refs...)
 					return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
 				}
 				if len(refs) != 1 || rt.RefType(refs[0]) == golua.TypeNil {
+					deleteRefs(rt, refs...)
 					return report, &errkind.Error{
 						Code:      errkind.ErrRuntime,
 						Type:      errkind.TypeRuntime,
@@ -89,9 +97,11 @@ func Run(workflow *dag.Workflow) (Report, error) {
 			for i := range items {
 				refs, err := rt.CallFunction(node.FnRef, 1, items[i].ItemRef)
 				if err != nil {
+					deleteRefs(rt, refs...)
 					return report, errkind.WithContext(err, string(node.Kind), node.Position, "")
 				}
 				if len(refs) != 1 || rt.RefType(refs[0]) == golua.TypeNil {
+					deleteRefs(rt, refs...)
 					return report, &errkind.Error{
 						Code:      errkind.ErrRuntime,
 						Type:      errkind.TypeRuntime,
@@ -100,6 +110,7 @@ func Run(workflow *dag.Workflow) (Report, error) {
 						Position:  node.Position,
 					}
 				}
+				rt.DeleteRef(items[i].ItemRef)
 				items[i].ItemRef = refs[0]
 			}
 		case primitive.Filter:
@@ -107,9 +118,11 @@ func Run(workflow *dag.Workflow) (Report, error) {
 			for i := range items {
 				refs, err := rt.CallFunction(node.FnRef, 1, items[i].ItemRef)
 				if err != nil {
+					deleteRefs(rt, refs...)
 					return report, errkind.WithContext(err, string(node.Kind), node.Position, "")
 				}
 				if len(refs) != 1 {
+					deleteRefs(rt, refs...)
 					return report, &errkind.Error{
 						Code:      errkind.ErrRuntime,
 						Type:      errkind.TypeRuntime,
@@ -122,6 +135,7 @@ func Run(workflow *dag.Workflow) (Report, error) {
 				isBool := rt.State.IsBoolean(-1)
 				keep := rt.State.ToBoolean(-1)
 				rt.State.Pop(1)
+				rt.DeleteRef(refs[0])
 				if !isBool {
 					return report, &errkind.Error{
 						Code:      errkind.ErrRuntime,
@@ -133,7 +147,9 @@ func Run(workflow *dag.Workflow) (Report, error) {
 				}
 				if keep {
 					filtered = append(filtered, items[i])
+					continue
 				}
+				rt.DeleteRef(items[i].ItemRef)
 			}
 			items = filtered
 		case primitive.Tap:
@@ -142,9 +158,12 @@ func Run(workflow *dag.Workflow) (Report, error) {
 				if err != nil {
 					return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
 				}
-				if _, err := rt.CallCallable(node.CallableRef, clonedRef, stateRef); err != nil {
+				resultRef, err := rt.CallCallable(node.CallableRef, clonedRef, stateRef)
+				rt.DeleteRef(clonedRef)
+				if err != nil {
 					return report, errkind.WithContext(err, string(node.Kind), node.Position, node.CallableName)
 				}
+				rt.DeleteRef(resultRef)
 			}
 		default:
 			return report, &errkind.Error{
@@ -170,6 +189,25 @@ func Run(workflow *dag.Workflow) (Report, error) {
 
 	report.ItemsOut = len(items)
 	return report, nil
+}
+
+func deleteRefs(rt *luaenv.Runtime, refs ...string) {
+	for _, ref := range refs {
+		if ref == "" {
+			continue
+		}
+		rt.DeleteRef(ref)
+	}
+}
+
+func deleteItemRefs(rt *luaenv.Runtime, items []itemState) {
+	for i := range items {
+		if items[i].ItemRef == "" {
+			continue
+		}
+		rt.DeleteRef(items[i].ItemRef)
+		items[i].ItemRef = ""
+	}
 }
 
 func FailureReport(workflow, version string, err error) Report {

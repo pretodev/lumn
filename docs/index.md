@@ -190,39 +190,24 @@ O `init.lua` retorna uma table com a definição completa do workflow. Não exis
 
 As ferramentas, integrações e primitivos da plataforma são acessados através do global `lumn`, injetado pelo runtime no momento da execução. Não existe `require` para recursos da plataforma — `lumn` é o namespace único de tudo que o engine oferece.
 
-O global `lumn` organiza seus recursos em dois grupos:
-
-**Utilitários nativos do runtime** — sempre disponíveis, sem instalação de plugin:
+Na fase `engine-core`, a superfície implementada do runtime é propositalmente pequena:
 
 ```lua
-lumn.http.client { ... }       -- cliente HTTP genérico
-lumn.http.post { ... }         -- shorthand para POST
-lumn.ai.agent { ... }          -- agente IA
-lumn.ai.model.azure_openai { } -- modelo OpenAI via Azure
-lumn.ai.structured_parser { }  -- parser de output estruturado
-lumn.auth.bearer("key")        -- resolve token do estado global
-lumn.date.now()                -- data/hora atual
-lumn.date.add(date, days)      -- aritmética de datas
-lumn.env("NOME")               -- variável de ambiente
-lumn.secret("NOME")            -- credencial do vault
-lumn.get("key")                -- lê estado global do workflow
-lumn.set("key", value)         -- grava estado global do workflow
-lumn.triggers.scheduler { }    -- trigger por intervalo/cron
-lumn.triggers.webhook { }      -- trigger por HTTP
-lumn.triggers.file_watcher { } -- trigger por evento de arquivo
+lumn.test_source(items) -- fonte builtin para testes e desenvolvimento local
+lumn.get("key")         -- lê estado global do workflow
+lumn.set("key", value)  -- grava estado global do workflow
 ```
 
-**Plugins instalados** — acessados via `lumn.plugins.<nome>`:
+Os primitivos atualmente disponíveis como globals são:
 
 ```lua
-lumn.plugins.outlook { ... }          -- Microsoft Outlook / Graph API
-lumn.plugins.sendgrid.send { ... }    -- SendGrid e-mail
-lumn.plugins.gdrive { ... }           -- Google Drive
-lumn.plugins.slack.message { ... }    -- Slack
-lumn.plugins.aws.s3 { ... }           -- Amazon S3
+call   { ... }
+set    { ... }
+filter { ... }
+tap    { ... }
 ```
 
-A distinção é clara: `require` carrega arquivos Lua do disco (código local do projeto); `lumn.*` acessa o runtime; `lumn.plugins.*` acessa plugins instalados via `lumn plugin add`.
+APIs como `lumn.http.*`, `lumn.ai.*`, `lumn.plugins.*`, triggers e primitivos adicionais aparecem nesta documentação apenas como direção de roadmap para fases futuras. Nesta PR, eles ainda não fazem parte da superfície executável.
 
 ### Modelo de pipeline
 
@@ -232,7 +217,7 @@ Um workflow opera sobre uma **lista de itens** que flui por uma sequência de pr
 [emails] → call → tap → pipe → distinct → filter → once → pipe → pipe → set → branch → [sent]
 ```
 
-Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/filter` em JavaScript ou pipes em Unix. Quando a lista de itens fica vazia em qualquer ponto do fluxo — por um `filter` sem resultados, por uma fonte sem dados, ou por erros que descartaram todos os itens — o workflow encerra naturalmente com status `"empty"`. Não existe primitivo especial para isso; é o comportamento padrão do runtime.
+Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/filter` em JavaScript ou pipes em Unix. Quando a lista de itens fica vazia em qualquer ponto do fluxo atualmente suportado — por um `filter` sem resultados ou por uma fonte sem dados — o workflow encerra naturalmente com status `"empty"`. Não existe primitivo especial para isso; é o comportamento padrão do runtime.
 
 ### Primitivos da DSL
 
@@ -242,13 +227,10 @@ Todos os primitivos usam **sintaxe de table** — `primitivo { chave = valor }`.
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------- |
 | `call`     | Cria a lista de itens a partir de uma fonte externa. `on_data(result)` retorna a forma inicial do item.                         | — (cria itens) |
 | `tap`      | Efeito colateral puro. O callable recebe o item diretamente; o resultado é descartado.                                          | Nunca          |
-| `pipe`     | Chama um callable por item e mergeia o resultado. `on_data(item, result)` retorna o item atualizado.                            | Sim            |
 | `set`      | Transformação Lua pura, sem chamada externa. `to(item)` calcula valores derivados e retorna o item.                             | Sim            |
 | `filter`   | Remove itens onde `condition(item)` retorna falso.                                                                              | Não            |
-| `distinct` | Remove duplicatas. `by(item)` retorna a chave de deduplicação; duplicatas são descartadas silenciosamente.                      | Não            |
-| `once`     | Executa um callable uma única vez para todo o lote (barreira). `on_data(result)` usa `lumn.set` para escrever no estado global. | Não            |
-| `branch`   | Roteia cada item para um sub-pipeline baseado em `condition(item)`.                                                             | Condicional    |
-| `parallel` | Executa sub-pipelines concorrentemente e aguarda todos convergirem.                                                             | Depende        |
+
+Primitivos como `pipe`, `distinct`, `once`, `branch` e `parallel` seguem no roadmap e ainda não foram implementados no runtime desta fase.
 
 ### A separação entre `call`, `pipe` e `set`
 

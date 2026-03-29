@@ -83,6 +83,7 @@ func NewRuntime(workflowDir, workspaceDir string, stderr io.Writer) (*Runtime, e
 		{name: "math", fn: golua.MathOpen},
 		{name: "bit32", fn: golua.Bit32Open},
 		{name: "utf8", fn: golua.UTF8Open},
+		{name: "os", fn: golua.OSOpen},
 	} {
 		golua.Require(l, lib.name, lib.fn, true)
 		l.Pop(1)
@@ -104,14 +105,13 @@ func (r *Runtime) Close() {
 	// Clear the runtime entry in the Lua registry to drop references from Lua to Go.
 	r.State.PushNil()
 	r.State.SetField(golua.RegistryIndex, registryRuntimeKey)
+	r.State.PushNil()
+	r.State.SetField(golua.RegistryIndex, registryStateKey)
 
 	// Reset the stack to avoid keeping unnecessary values alive.
 	r.State.SetTop(0)
 
-	// Close the underlying Lua state to release all associated resources.
-	r.State.Close()
-
-	// Drop Go-side references to help GC and mark the runtime as closed.
+	// Drop Go-side references so the VM becomes collectable by Go's GC.
 	r.State = nil
 	r.nextRef = 0
 }
@@ -802,27 +802,73 @@ func (r *Runtime) toGoValue(index int, seen map[interface{}]bool) (any, error) {
 		seen[identity] = true
 		defer delete(seen, identity)
 
-		abs := l.AbsIndex(index)
-		values := map[any]any{}
-		l.PushNil()
-		for l.Next(abs) {
-			key, err := r.toGoValue(-2, seen)
-			if err != nil {
-				l.Pop(2)
-				return nil, err
-			}
-			value, err := r.toGoValue(-1, seen)
-			if err != nil {
-				l.Pop(2)
-				return nil, err
-			}
-			values[key] = value
-			l.Pop(1)
-		}
-		return values, nil
+		return r.tableToGoValue(index, seen)
 	default:
 		return nil, errkind.New(errkind.ErrRuntime, errkind.TypeRuntime, fmt.Sprintf("unsupported Lua value type %s", l.TypeOf(index)))
 	}
+}
+
+func (r *Runtime) tableToGoValue(index int, seen map[interface{}]bool) (any, error) {
+	l := r.State
+	abs := l.AbsIndex(index)
+	arrayLen := l.RawLength(abs)
+	if arrayLen > 0 {
+		values := make([]any, arrayLen)
+		for i := 1; i <= arrayLen; i++ {
+			l.RawGetInt(abs, i)
+			value, err := r.toGoValue(-1, seen)
+			l.Pop(1)
+			if err != nil {
+				return nil, err
+			}
+			values[i-1] = value
+		}
+		if r.tableHasOnlyArrayKeys(abs, arrayLen) {
+			return values, nil
+		}
+	}
+
+	values := map[any]any{}
+	l.PushNil()
+	for l.Next(abs) {
+		key, err := r.toGoValue(-2, seen)
+		if err != nil {
+			l.Pop(2)
+			return nil, err
+		}
+		value, err := r.toGoValue(-1, seen)
+		if err != nil {
+			l.Pop(2)
+			return nil, err
+		}
+		values[key] = value
+		l.Pop(1)
+	}
+	return values, nil
+}
+
+func (r *Runtime) tableHasOnlyArrayKeys(index, arrayLen int) bool {
+	l := r.State
+
+	count := 0
+	l.PushNil()
+	for l.Next(index) {
+		count++
+
+		if !l.IsInteger(-2) {
+			l.Pop(2)
+			return false
+		}
+		key, ok := l.ToInteger64(-2)
+		if !ok || key < 1 || key > int64(arrayLen) {
+			l.Pop(2)
+			return false
+		}
+
+		l.Pop(1)
+	}
+
+	return count == arrayLen
 }
 
 func (r *Runtime) pushGoValue(value any) {

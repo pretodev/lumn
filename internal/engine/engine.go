@@ -64,6 +64,12 @@ func LoadTarget(input string, stderr io.Writer) (*dag.Workflow, Target, error) {
 	if err != nil {
 		return nil, target, err
 	}
+	keepRuntime := false
+	defer func() {
+		if !keepRuntime {
+			rt.Close()
+		}
+	}()
 
 	workflowRef, err := rt.LoadWorkflow(target.InitPath)
 	if err != nil {
@@ -74,6 +80,7 @@ func LoadTarget(input string, stderr io.Writer) (*dag.Workflow, Target, error) {
 	if err != nil {
 		return nil, target, err
 	}
+	keepRuntime = true
 	return workflow, target, nil
 }
 
