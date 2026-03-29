@@ -63,7 +63,7 @@ Todos os comandos de ciclo de vida do daemon devem ser adicionados:
 ### 5. Atualizar `lumn run` e `lumn validate`
 
 - `lumn run` sem argumento: procura `./lumn.lua` (modo dev, sem daemon, logs no terminal).
-- `lumn run <id|name>`: prioridade 1º daemon (instância registrada), 2º pasta local, 3º arquivo `.lua`.
+- `lumn run <id|name>`: tenta resolver no daemon primeiro (conexão obrigatória); se daemon não estiver rodando, prossegue para 2º pasta local, 3º arquivo `.lua`.
 - `lumn run -f <arquivo|pasta>`: força execução de arquivo/pasta local (ignora daemon).
 - `lumn validate` sem argumento: valida `./lumn.lua`.
 - `lumn validate -f <arquivo|pasta>`: valida arquivo/pasta específico.
@@ -100,7 +100,7 @@ Todos os comandos de ciclo de vida do daemon devem ser adicionados:
 - `lumn run` com argumento que não é uma instância no daemon nem um arquivo/pasta local: erro `ERR_WORKFLOW_NOT_FOUND`.
 - Daemon não rodando para comandos que exigem daemon: exibir mensagem de erro clara (ex: `"daemon is not running — start it with 'lumn daemon start'"`).
 - `lumn start` sem nome e sem estar dentro de uma pasta com `lumn.lua`: inferir nome do diretório atual.
-- `lumn start` com `name:tag` onde `name` já existe com mesma tag: comportamento a definir (sobrescrever ou errar).
+- `lumn start` com `name:tag` onde `name` já existe com mesma tag: sobrescreve a instância existente (update in-place).
 
 ## Acceptance Criteria
 
@@ -117,9 +117,11 @@ Todos os comandos de ciclo de vida do daemon devem ser adicionados:
 
 ## Open Questions
 
-- Quando `lumn start` recebe um `name:tag` que já existe no daemon, o comportamento correto é sobrescrever (update in-place) ou retornar erro exigindo `lumn delete` primeiro?
-- O `lumn run <name>` em modo "resolve do daemon primeiro" precisa de conexão com o daemon para tentar a resolução, ou deve tentar local primeiro quando o daemon não está rodando?
-- O campo `workflow` na saída JSON do `lumn run` deve usar o slug do nome da pasta (kebab-case) ou o nome literal da pasta?
+Todas as questões foram resolvidas:
+
+- **`lumn start` com `name:tag` já existente:** sobrescreve (update in-place). Não exige `lumn delete` antes.
+- **`lumn run <name>` — ordem de resolução:** tenta resolver no daemon primeiro. Se o daemon não estiver rodando, a tentativa de conexão falha e o comando prossegue para resolução local (pasta → arquivo `.lua`).
+- **Campo `workflow` na saída JSON:** usa o nome do workflow (conforme fornecido em `lumn start` ou inferido do nome da pasta), não um slug derivado.
 
 ## Testing Guidelines
 
