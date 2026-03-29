@@ -136,10 +136,20 @@ func runRunCommand(args []string, stdout, stderr io.Writer) int {
 		return int(errkind.ErrGeneric)
 	}
 
-	resp, err := client.ExecWorkflow(context.Background(), selector)
-	if err == nil {
-		writeReport(stdout, resp.Report)
-		return int(errkind.OK)
+	resolvedSelector, found, err := resolveDaemonSelector(client, selector)
+	if err == nil && found {
+		resp, execErr := client.ExecWorkflow(context.Background(), resolvedSelector)
+		if execErr == nil {
+			writeReport(stdout, resp.Report)
+			return int(errkind.OK)
+		}
+
+		var apiErr *daemon.APIError
+		if !daemon.IsDaemonNotRunning(execErr) && !(errors.As(execErr, &apiErr) && apiErr.StatusCode == 404) {
+			fmt.Fprintln(stderr, execErr)
+			return int(errkind.ErrGeneric)
+		}
+		err = execErr
 	}
 
 	var apiErr *daemon.APIError
@@ -227,7 +237,13 @@ func runSelectorMutation(
 		return int(errkind.ErrGeneric)
 	}
 
-	resp, err := run(client, args[0])
+	selector, err := requireDaemonSelector(client, args[0])
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	resp, err := run(client, selector)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return int(errkind.ErrGeneric)
@@ -282,7 +298,12 @@ func runWatchCommand(args []string, stdout, stderr io.Writer) int {
 		return int(errkind.ErrGeneric)
 	}
 	if selector != "" {
-		if _, err := client.WorkflowStatus(context.Background(), selector); err != nil {
+		resolvedSelector, err := requireDaemonSelector(client, selector)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		if _, err := client.WorkflowStatus(context.Background(), resolvedSelector); err != nil {
 			fmt.Fprintln(stderr, err)
 			return int(errkind.ErrGeneric)
 		}
@@ -313,7 +334,12 @@ func runLogsCommand(args []string, stdout, stderr io.Writer) int {
 		return int(errkind.ErrGeneric)
 	}
 	if selector != "" {
-		if _, err := client.WorkflowStatus(context.Background(), selector); err != nil {
+		resolvedSelector, err := requireDaemonSelector(client, selector)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		if _, err := client.WorkflowStatus(context.Background(), resolvedSelector); err != nil {
 			fmt.Fprintln(stderr, err)
 			return int(errkind.ErrGeneric)
 		}
@@ -635,6 +661,70 @@ func splitNameVersion(raw string) (string, string) {
 func inferSelectorName(selector string) string {
 	base := filepath.Base(filepath.Clean(selector))
 	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+func requireDaemonSelector(client *daemon.Client, selector string) (string, error) {
+	resolvedSelector, found, err := resolveDaemonSelector(client, selector)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("workflow %q not found", selector)
+	}
+	return resolvedSelector, nil
+}
+
+func resolveDaemonSelector(client *daemon.Client, selector string) (string, bool, error) {
+	resp, err := client.ListWorkflows(context.Background())
+	if err != nil {
+		return "", false, err
+	}
+	return selectWorkflowID(resp.Workflows, selector)
+}
+
+func selectWorkflowID(workflows []daemonapi.WorkflowResponse, selector string) (string, bool, error) {
+	for _, workflow := range workflows {
+		if workflow.ID == selector {
+			return workflow.ID, true, nil
+		}
+	}
+
+	nameMatches := make([]daemonapi.WorkflowResponse, 0, 2)
+	for _, workflow := range workflows {
+		if workflow.Name == selector {
+			nameMatches = append(nameMatches, workflow)
+		}
+	}
+	if len(nameMatches) == 1 {
+		return nameMatches[0].ID, true, nil
+	}
+	if len(nameMatches) > 1 {
+		for _, workflow := range nameMatches {
+			if workflow.Version == "latest" {
+				return workflow.ID, true, nil
+			}
+		}
+		return "", false, fmt.Errorf("workflow %q is ambiguous; use a workflow id or a unique id prefix", selector)
+	}
+
+	prefixMatches := make([]daemonapi.WorkflowResponse, 0, 4)
+	for _, workflow := range workflows {
+		if strings.HasPrefix(workflow.ID, selector) {
+			prefixMatches = append(prefixMatches, workflow)
+		}
+	}
+	switch len(prefixMatches) {
+	case 0:
+		return "", false, nil
+	case 1:
+		return prefixMatches[0].ID, true, nil
+	default:
+		ids := make([]string, 0, len(prefixMatches))
+		for _, workflow := range prefixMatches {
+			ids = append(ids, workflow.ID)
+		}
+		return "", false, fmt.Errorf("workflow id prefix %q is ambiguous; matches %s", selector, strings.Join(ids, ", "))
+	}
 }
 
 func isHelpToken(value string) bool {

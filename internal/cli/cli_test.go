@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pretodev/lumn/internal/daemonapi"
 	"github.com/pretodev/lumn/internal/executor"
 )
 
@@ -267,6 +268,62 @@ func TestCommandHelpIsAvailableViaHelpFlag(t *testing.T) {
 				t.Fatalf("%v expected %q in output %q", tc.args, match, stdout)
 			}
 		}
+	}
+}
+
+func TestSelectWorkflowIDAcceptsUniquePrefix(t *testing.T) {
+	t.Parallel()
+
+	workflows := []daemonapi.WorkflowResponse{
+		{ID: "9bc30fff", Name: "workflows", Version: "latest"},
+	}
+
+	resolved, found, err := selectWorkflowID(workflows, "9b")
+	if err != nil {
+		t.Fatalf("select workflow id: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected workflow to be found")
+	}
+	if resolved != "9bc30fff" {
+		t.Fatalf("resolved id = %q", resolved)
+	}
+}
+
+func TestSelectWorkflowIDRejectsAmbiguousPrefix(t *testing.T) {
+	t.Parallel()
+
+	workflows := []daemonapi.WorkflowResponse{
+		{ID: "9bc30fff", Name: "one", Version: "latest"},
+		{ID: "9bd40aaa", Name: "two", Version: "latest"},
+	}
+
+	_, found, err := selectWorkflowID(workflows, "9b")
+	if err == nil {
+		t.Fatalf("expected ambiguous prefix error")
+	}
+	if found {
+		t.Fatalf("did not expect workflow to be found")
+	}
+}
+
+func TestSelectWorkflowIDPrefersNameBeforePrefix(t *testing.T) {
+	t.Parallel()
+
+	workflows := []daemonapi.WorkflowResponse{
+		{ID: "9bc30fff", Name: "9b", Version: "latest"},
+		{ID: "9bd40aaa", Name: "other", Version: "latest"},
+	}
+
+	resolved, found, err := selectWorkflowID(workflows, "9b")
+	if err != nil {
+		t.Fatalf("select workflow id: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected workflow to be found")
+	}
+	if resolved != "9bc30fff" {
+		t.Fatalf("resolved id = %q", resolved)
 	}
 }
 
