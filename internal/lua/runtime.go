@@ -555,14 +555,19 @@ func missingUsage(l *golua.State) int {
 
 func printFunc(l *golua.State) int {
 	rt := runtimeFromState(l)
-	parts := make([]string, 0, l.Top())
-	for i := 1; i <= l.Top(); i++ {
+	originalTop := l.Top()
+	parts := make([]string, 0, originalTop)
+	for i := 1; i <= originalTop; i++ {
+		beforeTop := l.Top()
 		s, ok := golua.ToStringMeta(l, i)
+		afterTop := l.Top()
+		if afterTop > beforeTop {
+			l.Pop(afterTop - beforeTop)
+		}
 		if !ok {
 			s = fmt.Sprintf("<%s>", l.TypeOf(i))
 		}
 		parts = append(parts, s)
-		l.Pop(1)
 	}
 	fmt.Fprintln(rt.stderr, strings.Join(parts, "\t"))
 	return 0
