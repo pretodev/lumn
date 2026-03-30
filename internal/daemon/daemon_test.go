@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pretodev/lumn/internal/daemonapi"
 )
 
 func TestDaemonHealthManualExecAndReactivate(t *testing.T) {
@@ -29,13 +31,11 @@ func TestDaemonHealthManualExecAndReactivate(t *testing.T) {
 	}
 
 	workflowDir := filepath.Join(t.TempDir(), "manual")
-	writeWorkflow(t, workflowDir, `
+	writeWorkflow(t, workflowDir, "lumn.lua", `
 return {
-  id = "manual",
-  version = "1.0.0",
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -49,7 +49,10 @@ return {
 }
 `)
 
-	if _, err := client.StartWorkflow(context.Background(), workflowDir); err != nil {
+	startResp, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Target: workflowDir,
+	})
+	if err != nil {
 		t.Fatalf("start workflow: %v", err)
 	}
 
@@ -59,6 +62,9 @@ return {
 	}
 	if execResp.Report.Status != "ok" || execResp.Report.ItemsOut != 1 {
 		t.Fatalf("unexpected exec report: %+v", execResp.Report)
+	}
+	if execResp.Report.Workflow != "manual" || execResp.Report.Version != "latest" {
+		t.Fatalf("unexpected exec metadata: %+v", execResp.Report)
 	}
 
 	if _, err := client.StopWorkflow(context.Background(), "manual"); err != nil {
@@ -73,15 +79,191 @@ return {
 		t.Fatalf("expected stopped status, got %+v", status.Workflow)
 	}
 
-	if _, err := client.StartWorkflow(context.Background(), workflowDir); err != nil {
+	restartResp, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Target: workflowDir,
+	})
+	if err != nil {
 		t.Fatalf("reactivate workflow: %v", err)
 	}
-	status, err = client.WorkflowStatus(context.Background(), "manual")
-	if err != nil {
-		t.Fatalf("workflow status after reactivation: %v", err)
+	if restartResp.WorkflowID != startResp.WorkflowID {
+		t.Fatalf("workflow id changed: %s != %s", restartResp.WorkflowID, startResp.WorkflowID)
 	}
-	if status.Workflow.Status != "active" {
-		t.Fatalf("expected active status, got %+v", status.Workflow)
+}
+
+func TestDaemonStartReusesIDForSameNameVersion(t *testing.T) {
+	t.Parallel()
+
+	_, client, _ := newTestDaemon(t)
+
+	workflowDir := filepath.Join(t.TempDir(), "versioned")
+	writeWorkflow(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = lumn.from({ { id = 1 } }),
+      on_data = function(result)
+        return result
+      end,
+    },
+  }
+}
+`)
+
+	first, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Name:    "cancelamentos",
+		Version: "1.2",
+		Target:  workflowDir,
+	})
+	if err != nil {
+		t.Fatalf("start first workflow: %v", err)
+	}
+
+	second, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Name:    "cancelamentos",
+		Version: "1.2",
+		Target:  workflowDir,
+	})
+	if err != nil {
+		t.Fatalf("start replacement workflow: %v", err)
+	}
+	if first.WorkflowID != second.WorkflowID {
+		t.Fatalf("workflow id changed: %s != %s", first.WorkflowID, second.WorkflowID)
+	}
+
+	status, err := client.WorkflowStatus(context.Background(), "cancelamentos")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Workflow.Name != "cancelamentos" || status.Workflow.Version != "1.2" {
+		t.Fatalf("unexpected workflow status: %+v", status.Workflow)
+	}
+}
+
+func TestDaemonSelectorsAcceptUniqueIDPrefixes(t *testing.T) {
+	t.Parallel()
+
+	_, client, _ := newTestDaemon(t)
+
+	workflowDir := filepath.Join(t.TempDir(), "prefix")
+	writeWorkflow(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = lumn.from({ { id = 1 } }),
+      on_data = function(result)
+        return result
+      end,
+    },
+  }
+}
+`)
+
+	startResp, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Name:   "prefix-test",
+		Target: workflowDir,
+	})
+	if err != nil {
+		t.Fatalf("start workflow: %v", err)
+	}
+
+	prefix := startResp.WorkflowID[:4]
+	status, err := client.WorkflowStatus(context.Background(), prefix)
+	if err != nil {
+		t.Fatalf("status by prefix: %v", err)
+	}
+	if status.Workflow.ID != startResp.WorkflowID {
+		t.Fatalf("unexpected workflow: %+v", status.Workflow)
+	}
+
+	if _, err := client.StopWorkflow(context.Background(), prefix); err != nil {
+		t.Fatalf("stop by prefix: %v", err)
+	}
+}
+
+func TestDaemonDeleteRemovesWorkflow(t *testing.T) {
+	t.Parallel()
+
+	_, client, _ := newTestDaemon(t)
+
+	workflowDir := filepath.Join(t.TempDir(), "cleanup")
+	writeWorkflow(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = lumn.from({ { id = 1 } }),
+      on_data = function(result)
+        return result
+      end,
+    },
+  }
+}
+`)
+
+	if _, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Target: workflowDir,
+	}); err != nil {
+		t.Fatalf("start workflow: %v", err)
+	}
+
+	if _, err := client.DeleteWorkflow(context.Background(), "cleanup"); err != nil {
+		t.Fatalf("delete workflow: %v", err)
+	}
+
+	if _, err := client.WorkflowStatus(context.Background(), "cleanup"); err == nil {
+		t.Fatalf("expected workflow to be deleted")
+	}
+}
+
+func TestDaemonListIncludesNameVersionAndFails(t *testing.T) {
+	t.Parallel()
+
+	_, client, _ := newTestDaemon(t)
+
+	workflowDir := filepath.Join(t.TempDir(), "failing")
+	writeWorkflow(t, workflowDir, "lumn.lua", `
+return {
+  flow = {
+    call {
+      exec = lumn.from({ { id = 1 } }),
+      on_data = function(result)
+        return result
+      end,
+    },
+    set {
+      to = function(item)
+        return nil
+      end,
+    },
+  }
+}
+`)
+
+	if _, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Name:    "cancelamentos",
+		Version: "1.2",
+		Target:  workflowDir,
+	}); err != nil {
+		t.Fatalf("start workflow: %v", err)
+	}
+
+	resp, err := client.ExecWorkflow(context.Background(), "cancelamentos")
+	if err != nil {
+		t.Fatalf("exec workflow: %v", err)
+	}
+	if resp.Report.Status != "error" {
+		t.Fatalf("expected error report, got %+v", resp.Report)
+	}
+
+	list, err := client.ListWorkflows(context.Background())
+	if err != nil {
+		t.Fatalf("list workflows: %v", err)
+	}
+	if len(list.Workflows) != 1 {
+		t.Fatalf("unexpected workflows: %+v", list.Workflows)
+	}
+	workflow := list.Workflows[0]
+	if workflow.Name != "cancelamentos" || workflow.Version != "1.2" || workflow.Fails != 1 {
+		t.Fatalf("unexpected list row: %+v", workflow)
 	}
 }
 
@@ -91,10 +273,8 @@ func TestDaemonWebhookTriggerAndConflict(t *testing.T) {
 	_, client, cfg := newTestDaemon(t)
 
 	firstDir := filepath.Join(t.TempDir(), "webhook-one")
-	writeWorkflow(t, firstDir, `
+	writeWorkflow(t, firstDir, "lumn.lua", `
 return {
-  id = "webhook-one",
-  version = "1.0.0",
   triggers = {
     lumn.triggers.webhook {
       path = "/hooks/test",
@@ -103,7 +283,7 @@ return {
   },
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -117,15 +297,15 @@ return {
   }
 }
 `)
-	if _, err := client.StartWorkflow(context.Background(), firstDir); err != nil {
+	if _, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Target: firstDir,
+	}); err != nil {
 		t.Fatalf("start first webhook workflow: %v", err)
 	}
 
 	secondDir := filepath.Join(t.TempDir(), "webhook-two")
-	writeWorkflow(t, secondDir, `
+	writeWorkflow(t, secondDir, "lumn.lua", `
 return {
-  id = "webhook-two",
-  version = "1.0.0",
   triggers = {
     lumn.triggers.webhook {
       path = "/hooks/test",
@@ -134,7 +314,7 @@ return {
   },
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -142,7 +322,9 @@ return {
   }
 }
 `)
-	if _, err := client.StartWorkflow(context.Background(), secondDir); err == nil {
+	if _, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Target: secondDir,
+	}); err == nil {
 		t.Fatalf("expected webhook conflict")
 	}
 
@@ -169,10 +351,8 @@ func TestDaemonFileWatcherTrigger(t *testing.T) {
 		t.Fatalf("mkdir watch dir: %v", err)
 	}
 	workflowDir := filepath.Join(t.TempDir(), "watcher")
-	writeWorkflow(t, workflowDir, `
+	writeWorkflow(t, workflowDir, "lumn.lua", `
 return {
-  id = "watcher",
-  version = "1.0.0",
   triggers = {
     lumn.triggers.file_watcher {
       path = "`+strings.ReplaceAll(watchDir, `\`, `\\`)+`",
@@ -183,7 +363,7 @@ return {
   },
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -198,7 +378,9 @@ return {
 }
 `)
 
-	if _, err := client.StartWorkflow(context.Background(), workflowDir); err != nil {
+	if _, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Target: workflowDir,
+	}); err != nil {
 		t.Fatalf("start watcher workflow: %v", err)
 	}
 
@@ -215,10 +397,8 @@ func TestDaemonSchedulerTrigger(t *testing.T) {
 	_, client, _ := newTestDaemon(t)
 
 	workflowDir := filepath.Join(t.TempDir(), "scheduler")
-	writeWorkflow(t, workflowDir, `
+	writeWorkflow(t, workflowDir, "lumn.lua", `
 return {
-  id = "scheduler",
-  version = "1.0.0",
   triggers = {
     lumn.triggers.scheduler {
       interval = "1s",
@@ -226,7 +406,7 @@ return {
   },
   flow = {
     call {
-      exec = lumn.test_source({ { id = 1 } }),
+      exec = lumn.from({ { id = 1 } }),
       on_data = function(result)
         return result
       end,
@@ -240,7 +420,9 @@ return {
 }
 `)
 
-	if _, err := client.StartWorkflow(context.Background(), workflowDir); err != nil {
+	if _, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Target: workflowDir,
+	}); err != nil {
 		t.Fatalf("start scheduler workflow: %v", err)
 	}
 
@@ -276,12 +458,12 @@ func newTestDaemon(t *testing.T) (*Daemon, *Client, Config) {
 	return server, NewClient(paths), cfg
 }
 
-func writeWorkflow(t *testing.T, dir, body string) {
+func writeWorkflow(t *testing.T, dir, fileName, body string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir workflow: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "init.lua"), []byte(strings.TrimSpace(body)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, fileName), []byte(strings.TrimSpace(body)+"\n"), 0o644); err != nil {
 		t.Fatalf("write workflow: %v", err)
 	}
 }

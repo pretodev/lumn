@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"text/tabwriter"
-	"text/template"
 	"time"
 
 	"github.com/pretodev/lumn/internal/daemon"
@@ -24,143 +23,354 @@ import (
 
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printUsage(stderr)
+		printMainHelp(stderr)
 		return int(errkind.ErrGeneric)
 	}
 
+	if isHelpToken(args[0]) {
+		printMainHelp(stdout)
+		return int(errkind.OK)
+	}
+
+	if args[0] == "help" {
+		return runHelpCommand(args[1:], stdout, stderr)
+	}
+
 	switch args[0] {
-	case "init":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: lumn init <name>")
-			return int(errkind.ErrGeneric)
-		}
-		if err := initWorkflow(args[1]); err != nil {
-			fmt.Fprintln(stderr, errkind.Format(err))
-			return errkind.ExitStatus(err)
-		}
-		fmt.Fprintf(stdout, "created %s\n", filepath.Join(args[1], "init.lua"))
-		return int(errkind.OK)
 	case "validate":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: lumn validate <workflow|init.lua>")
-			return int(errkind.ErrGeneric)
-		}
-		if err := engine.ValidateTarget(args[1], stderr); err != nil {
-			fmt.Fprintln(stderr, errkind.Format(err))
-			return errkind.ExitStatus(err)
-		}
-		return int(errkind.OK)
+		return runValidateCommand(args[1:], stdout, stderr)
 	case "run":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: lumn run <workflow|init.lua>")
-			return int(errkind.ErrGeneric)
-		}
-		report, code := engine.RunTarget(args[1], stderr)
-		writeReport(stdout, report)
-		return code
+		return runRunCommand(args[1:], stdout, stderr)
 	case "start":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: lumn start <workflow>")
-			return int(errkind.ErrGeneric)
-		}
-		client, err := newDaemonClient()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return int(errkind.ErrGeneric)
-		}
-		resp, err := client.StartWorkflow(context.Background(), args[1])
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return int(errkind.ErrGeneric)
-		}
-		fmt.Fprintln(stdout, resp.Message)
-		return int(errkind.OK)
+		return runStartCommand(args[1:], stdout, stderr)
 	case "stop":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: lumn stop <workflow-id>")
-			return int(errkind.ErrGeneric)
-		}
-		client, err := newDaemonClient()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return int(errkind.ErrGeneric)
-		}
-		resp, err := client.StopWorkflow(context.Background(), args[1])
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return int(errkind.ErrGeneric)
-		}
-		fmt.Fprintln(stdout, resp.Message)
-		return int(errkind.OK)
+		return runSelectorMutation(args[1:], stdout, stderr, "stop", func(client *daemon.Client, selector string) (daemonapi.WorkflowMutationResponse, error) {
+			return client.StopWorkflow(context.Background(), selector)
+		})
+	case "delete":
+		return runSelectorMutation(args[1:], stdout, stderr, "delete", func(client *daemon.Client, selector string) (daemonapi.WorkflowMutationResponse, error) {
+			return client.DeleteWorkflow(context.Background(), selector)
+		})
 	case "restart":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: lumn restart <workflow-id>")
-			return int(errkind.ErrGeneric)
-		}
-		client, err := newDaemonClient()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return int(errkind.ErrGeneric)
-		}
-		resp, err := client.RestartWorkflow(context.Background(), args[1])
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return int(errkind.ErrGeneric)
-		}
-		fmt.Fprintln(stdout, resp.Message)
-		return int(errkind.OK)
-	case "status":
-		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: lumn status")
-			return int(errkind.ErrGeneric)
-		}
-		client, err := newDaemonClient()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return int(errkind.ErrGeneric)
-		}
-		resp, err := client.ListWorkflows(context.Background())
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return int(errkind.ErrGeneric)
-		}
-		renderWorkflowStatus(stdout, resp)
-		return int(errkind.OK)
-	case "exec":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: lumn exec <workflow-id>")
-			return int(errkind.ErrGeneric)
-		}
-		client, err := newDaemonClient()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return int(errkind.ErrGeneric)
-		}
-		resp, err := client.ExecWorkflow(context.Background(), args[1])
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return int(errkind.ErrGeneric)
-		}
-		writeReport(stdout, resp.Report)
-		return int(errkind.OK)
+		return runSelectorMutation(args[1:], stdout, stderr, "restart", func(client *daemon.Client, selector string) (daemonapi.WorkflowMutationResponse, error) {
+			return client.RestartWorkflow(context.Background(), selector)
+		})
+	case "list":
+		return runListCommand(args[1:], stdout, stderr)
+	case "watch":
+		return runWatchCommand(args[1:], stdout, stderr)
+	case "logs":
+		return runLogsCommand(args[1:], stdout, stderr)
 	case "daemon":
 		return runDaemonCommand(args[1:], stdout, stderr)
 	default:
-		printUsage(stderr)
+		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
+		printMainHelp(stderr)
 		return int(errkind.ErrGeneric)
 	}
 }
 
+func runHelpCommand(args []string, stdout, stderr io.Writer) int {
+	topic, err := parseHelpTopic(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+	if topic == "" {
+		printMainHelp(stdout)
+		return int(errkind.OK)
+	}
+	if !printHelpTopic(stdout, topic) {
+		fmt.Fprintf(stderr, "unknown help topic %q\n\n", topic)
+		printMainHelp(stderr)
+		return int(errkind.ErrGeneric)
+	}
+	return int(errkind.OK)
+}
+
+func runValidateCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printValidateHelp(stdout)
+		return int(errkind.OK)
+	}
+
+	target, err := parseValidateArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+	if err := engine.ValidateTarget(target, stderr); err != nil {
+		fmt.Fprintln(stderr, errkind.Format(err))
+		return errkind.ExitStatus(err)
+	}
+	return int(errkind.OK)
+}
+
+func runRunCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printRunHelp(stdout)
+		return int(errkind.OK)
+	}
+
+	selector, forcedTarget, err := parseRunArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	if forcedTarget != "" {
+		report, code := engine.RunTarget(forcedTarget, stderr)
+		writeReport(stdout, report)
+		return code
+	}
+
+	if selector == "" {
+		report, code := engine.RunTarget("", stderr)
+		writeReport(stdout, report)
+		return code
+	}
+
+	client, err := newDaemonClient()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	resolvedSelector, found, err := resolveDaemonSelector(client, selector)
+	if err == nil && found {
+		resp, execErr := client.ExecWorkflow(context.Background(), resolvedSelector)
+		if execErr == nil {
+			writeReport(stdout, resp.Report)
+			return int(errkind.OK)
+		}
+
+		var apiErr *daemon.APIError
+		if !daemon.IsDaemonNotRunning(execErr) && !(errors.As(execErr, &apiErr) && apiErr.StatusCode == 404) {
+			fmt.Fprintln(stderr, execErr)
+			return int(errkind.ErrGeneric)
+		}
+		err = execErr
+	}
+
+	var apiErr *daemon.APIError
+	if !daemon.IsDaemonNotRunning(err) && !(errors.As(err, &apiErr) && apiErr.StatusCode == 404) {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	target, resolveErr := engine.ResolveLocalSelector(selector)
+	if resolveErr != nil {
+		writeReport(stdout, executor.FailureReport(inferSelectorName(selector), "latest", resolveErr))
+		return errkind.ExitStatus(resolveErr)
+	}
+
+	report, code := engine.RunTarget(target.TargetPath, stderr)
+	writeReport(stdout, report)
+	return code
+}
+
+func runStartCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printStartHelp(stdout)
+		return int(errkind.OK)
+	}
+
+	nameArg, targetArg, err := parseStartArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	target, err := engine.ResolveTarget(targetArg)
+	if err != nil {
+		fmt.Fprintln(stderr, errkind.Format(err))
+		return errkind.ExitStatus(err)
+	}
+
+	name, version := splitNameVersion(nameArg)
+	if name == "" {
+		name = target.Name
+	}
+	if version == "" {
+		version = "latest"
+	}
+
+	client, err := newDaemonClient()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	resp, err := client.StartWorkflow(context.Background(), daemonapi.StartWorkflowRequest{
+		Name:    name,
+		Version: version,
+		Target:  target.TargetPath,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	fmt.Fprintln(stdout, resp.Message)
+	return int(errkind.OK)
+}
+
+func runSelectorMutation(
+	args []string,
+	stdout, stderr io.Writer,
+	command string,
+	run func(client *daemon.Client, selector string) (daemonapi.WorkflowMutationResponse, error),
+) int {
+	if hasHelpFlag(args) {
+		printSelectorCommandHelp(stdout, command)
+		return int(errkind.OK)
+	}
+
+	if len(args) != 1 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(stderr, usageError(command, "expected exactly one workflow selector"))
+		return int(errkind.ErrGeneric)
+	}
+
+	client, err := newDaemonClient()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	selector, err := requireDaemonSelector(client, args[0])
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	resp, err := run(client, selector)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	fmt.Fprintln(stdout, resp.Message)
+	return int(errkind.OK)
+}
+
+func runListCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printListHelp(stdout)
+		return int(errkind.OK)
+	}
+
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, usageError("list", "list does not accept positional arguments"))
+		return int(errkind.ErrGeneric)
+	}
+
+	client, err := newDaemonClient()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	resp, err := client.ListWorkflows(context.Background())
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	renderWorkflowList(stdout, resp)
+	return int(errkind.OK)
+}
+
+func runWatchCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printWatchHelp(stdout)
+		return int(errkind.OK)
+	}
+
+	selector, err := parseOptionalSelector(args, "watch")
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	client, err := newDaemonClient()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+	if selector != "" {
+		resolvedSelector, err := requireDaemonSelector(client, selector)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		if _, err := client.WorkflowStatus(context.Background(), resolvedSelector); err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+	} else if _, err := client.Health(context.Background()); err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	fmt.Fprintln(stdout, "watch is not implemented yet")
+	return int(errkind.OK)
+}
+
+func runLogsCommand(args []string, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		printLogsHelp(stdout)
+		return int(errkind.OK)
+	}
+
+	selector, err := parseLogsArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	client, err := newDaemonClient()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+	if selector != "" {
+		resolvedSelector, err := requireDaemonSelector(client, selector)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+		if _, err := client.WorkflowStatus(context.Background(), resolvedSelector); err != nil {
+			fmt.Fprintln(stderr, err)
+			return int(errkind.ErrGeneric)
+		}
+	} else if _, err := client.Health(context.Background()); err != nil {
+		fmt.Fprintln(stderr, err)
+		return int(errkind.ErrGeneric)
+	}
+
+	fmt.Fprintln(stdout, "logs is not implemented yet")
+	return int(errkind.OK)
+}
+
 func runDaemonCommand(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: lumn daemon <start|stop|status>")
+		printDaemonHelp(stderr)
 		return int(errkind.ErrGeneric)
+	}
+
+	if isHelpToken(args[0]) {
+		printDaemonHelp(stdout)
+		return int(errkind.OK)
 	}
 
 	switch args[0] {
 	case "start":
+		if hasHelpFlag(args[1:]) {
+			printDaemonStartHelp(stdout)
+			return int(errkind.OK)
+		}
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: lumn daemon start")
+			fmt.Fprintln(stderr, usageError("daemon start", "daemon start does not accept additional arguments"))
 			return int(errkind.ErrGeneric)
 		}
 		if err := startDaemonProcess(); err != nil {
@@ -170,8 +380,12 @@ func runDaemonCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "daemon started")
 		return int(errkind.OK)
 	case "stop":
+		if hasHelpFlag(args[1:]) {
+			printDaemonStopHelp(stdout)
+			return int(errkind.OK)
+		}
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: lumn daemon stop")
+			fmt.Fprintln(stderr, usageError("daemon stop", "daemon stop does not accept additional arguments"))
 			return int(errkind.ErrGeneric)
 		}
 		client, err := newDaemonClient()
@@ -186,8 +400,12 @@ func runDaemonCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "daemon stopped")
 		return int(errkind.OK)
 	case "status":
+		if hasHelpFlag(args[1:]) {
+			printDaemonStatusHelp(stdout)
+			return int(errkind.OK)
+		}
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: lumn daemon status")
+			fmt.Fprintln(stderr, usageError("daemon status", "daemon status does not accept additional arguments"))
 			return int(errkind.ErrGeneric)
 		}
 		client, err := newDaemonClient()
@@ -203,13 +421,10 @@ func runDaemonCommand(args []string, stdout, stderr io.Writer) int {
 		renderDaemonStatus(stdout, health)
 		return int(errkind.OK)
 	default:
-		fmt.Fprintln(stderr, "usage: lumn daemon <start|stop|status>")
+		fmt.Fprintf(stderr, "unknown daemon command %q\n\n", args[0])
+		printDaemonHelp(stderr)
 		return int(errkind.ErrGeneric)
 	}
-}
-
-type scaffoldData struct {
-	ID string
 }
 
 func newDaemonClient() (*daemon.Client, error) {
@@ -291,52 +506,24 @@ func daemonBinaryName() string {
 	return "lumnd"
 }
 
-func initWorkflow(name string) error {
-	if name == "" {
-		return errkind.New(errkind.ErrGeneric, errkind.TypeGeneric, "workflow name is required")
-	}
-
-	if _, err := os.Stat(name); err == nil {
-		return errkind.New(errkind.ErrGeneric, errkind.TypeGeneric, "target already exists")
-	}
-
-	if err := os.MkdirAll(name, 0o755); err != nil {
-		return errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, err.Error(), err)
-	}
-
-	initPath := filepath.Join(name, "init.lua")
-	file, err := os.Create(initPath)
-	if err != nil {
-		return errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, err.Error(), err)
-	}
-	defer file.Close()
-
-	tpl := template.Must(template.New("init").Parse(initTemplate))
-	if err := tpl.Execute(file, scaffoldData{ID: filepath.Base(name)}); err != nil {
-		return errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, err.Error(), err)
-	}
-
-	return nil
-}
-
 func writeReport(stdout io.Writer, report executor.Report) {
 	enc := json.NewEncoder(stdout)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(report)
 }
 
-func renderWorkflowStatus(stdout io.Writer, resp daemonapi.WorkflowsListResponse) {
+func renderWorkflowList(stdout io.Writer, resp daemonapi.WorkflowsListResponse) {
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tVersion\tStatus\tTrigger\tNext Run\tLast Run\tLast Status")
+	fmt.Fprintln(tw, "ID\tNAME\tVERSION\tSTATUS\tLAST RUN\tFAILS\tNEXT RUN")
 	for _, workflow := range resp.Workflows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
 			workflow.ID,
+			workflow.Name,
 			workflow.Version,
 			workflow.Status,
-			strings.Join(workflow.Triggers, ","),
-			orDash(workflow.NextRun),
 			orDash(workflow.LastRun),
-			orDash(workflow.LastStatus),
+			workflow.Fails,
+			orDash(workflow.NextRun),
 		)
 	}
 	_ = tw.Flush()
@@ -357,49 +544,561 @@ func orDash(value string) string {
 	return value
 }
 
-func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: lumn <init|validate|run|start|stop|restart|status|exec|daemon>")
+func parseValidateArgs(args []string) (string, error) {
+	target, positionals, err := extractTargetFlag(args)
+	if err != nil {
+		return "", usageError("validate", err.Error())
+	}
+	if len(positionals) != 0 {
+		return "", usageError("validate", "validate accepts no positional arguments")
+	}
+	return target, nil
 }
 
-const initTemplate = `local items = {
-  { id = 1, nome = "Item A", valor = 100 },
-  { id = 2, nome = "Item B", valor = 50 },
-  { id = 3, nome = "Item C", valor = 200 },
+func parseRunArgs(args []string) (string, string, error) {
+	target, positionals, err := extractTargetFlag(args)
+	if err != nil {
+		return "", "", usageError("run", err.Error())
+	}
+	if len(positionals) > 1 {
+		return "", "", usageError("run", "run accepts at most one workflow selector")
+	}
+	if target != "" && len(positionals) > 0 {
+		return "", "", usageError("run", "selector and -f cannot be used together")
+	}
+	if len(positionals) == 1 {
+		return positionals[0], target, nil
+	}
+	return "", target, nil
 }
 
-local log_item = {
-  name = "log_item",
-  run = function(input)
-    print(input.nome .. " aprovado")
-  end
+func parseStartArgs(args []string) (string, string, error) {
+	target, positionals, err := extractTargetFlag(args)
+	if err != nil {
+		return "", "", usageError("start", err.Error())
+	}
+	if len(positionals) > 1 {
+		return "", "", usageError("start", "start accepts at most one optional name[:tag] argument")
+	}
+	name := ""
+	if len(positionals) == 1 {
+		name = positionals[0]
+	}
+	return name, target, nil
 }
 
-return {
-  id = "{{ .ID }}",
-  version = "1.0.0",
-  flow = {
-    call {
-      exec = lumn.test_source(items),
-      on_data = function(result)
-        return result
-      end,
-    },
-    set {
-      to = function(item)
-        lumn.set("ultimo_item_id", item.id)
-        item.ultimo_item_id = lumn.get("ultimo_item_id")
-        item.processado = true
-        return item
-      end,
-    },
-    filter {
-      condition = function(item)
-        return item.valor > 80
-      end,
-    },
-    tap {
-      exec = log_item,
-    },
-  }
+func parseOptionalSelector(args []string, command string) (string, error) {
+	if len(args) > 1 {
+		return "", usageError(command, fmt.Sprintf("%s accepts at most one workflow selector", command))
+	}
+	if len(args) == 1 && strings.HasPrefix(args[0], "-") {
+		return "", usageError(command, "selectors cannot start with '-'")
+	}
+	if len(args) == 0 {
+		return "", nil
+	}
+	return args[0], nil
 }
-`
+
+func parseLogsArgs(args []string) (string, error) {
+	var selector string
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+		switch arg {
+		case "--no-follow":
+		case "--lines", "--since", "--level", "--step":
+			if idx+1 >= len(args) {
+				return "", usageError("logs", fmt.Sprintf("flag %s requires a value", arg))
+			}
+			idx++
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return "", usageError("logs", fmt.Sprintf("unknown flag %s", arg))
+			}
+			if selector != "" {
+				return "", usageError("logs", "logs accepts at most one workflow selector")
+			}
+			selector = arg
+		}
+	}
+	return selector, nil
+}
+
+func extractTargetFlag(args []string) (string, []string, error) {
+	target := ""
+	positionals := make([]string, 0, len(args))
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+		switch {
+		case arg == "-f":
+			if idx+1 >= len(args) {
+				return "", nil, errors.New("missing value for -f")
+			}
+			target = args[idx+1]
+			idx++
+		case strings.HasPrefix(arg, "-f="):
+			target = strings.TrimPrefix(arg, "-f=")
+		case strings.HasPrefix(arg, "-"):
+			return "", nil, fmt.Errorf("unknown flag %s", arg)
+		default:
+			positionals = append(positionals, arg)
+		}
+	}
+	return target, positionals, nil
+}
+
+func splitNameVersion(raw string) (string, string) {
+	if raw == "" {
+		return "", ""
+	}
+	name, version, ok := strings.Cut(raw, ":")
+	if !ok {
+		return raw, ""
+	}
+	return name, version
+}
+
+func inferSelectorName(selector string) string {
+	base := filepath.Base(filepath.Clean(selector))
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+func requireDaemonSelector(client *daemon.Client, selector string) (string, error) {
+	resolvedSelector, found, err := resolveDaemonSelector(client, selector)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("workflow %q not found", selector)
+	}
+	return resolvedSelector, nil
+}
+
+func resolveDaemonSelector(client *daemon.Client, selector string) (string, bool, error) {
+	resp, err := client.ListWorkflows(context.Background())
+	if err != nil {
+		return "", false, err
+	}
+	return selectWorkflowID(resp.Workflows, selector)
+}
+
+func selectWorkflowID(workflows []daemonapi.WorkflowResponse, selector string) (string, bool, error) {
+	for _, workflow := range workflows {
+		if workflow.ID == selector {
+			return workflow.ID, true, nil
+		}
+	}
+
+	nameMatches := make([]daemonapi.WorkflowResponse, 0, 2)
+	for _, workflow := range workflows {
+		if workflow.Name == selector {
+			nameMatches = append(nameMatches, workflow)
+		}
+	}
+	if len(nameMatches) == 1 {
+		return nameMatches[0].ID, true, nil
+	}
+	if len(nameMatches) > 1 {
+		for _, workflow := range nameMatches {
+			if workflow.Version == "latest" {
+				return workflow.ID, true, nil
+			}
+		}
+		return "", false, fmt.Errorf("workflow %q is ambiguous; use a workflow id or a unique id prefix", selector)
+	}
+
+	prefixMatches := make([]daemonapi.WorkflowResponse, 0, 4)
+	for _, workflow := range workflows {
+		if strings.HasPrefix(workflow.ID, selector) {
+			prefixMatches = append(prefixMatches, workflow)
+		}
+	}
+	switch len(prefixMatches) {
+	case 0:
+		return "", false, nil
+	case 1:
+		return prefixMatches[0].ID, true, nil
+	default:
+		ids := make([]string, 0, len(prefixMatches))
+		for _, workflow := range prefixMatches {
+			ids = append(ids, workflow.ID)
+		}
+		return "", false, fmt.Errorf("workflow id prefix %q is ambiguous; matches %s", selector, strings.Join(ids, ", "))
+	}
+}
+
+func isHelpToken(value string) bool {
+	return value == "-h" || value == "--help"
+}
+
+func hasHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if isHelpToken(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+func usageError(command, message string) error {
+	return fmt.Errorf("%s\n\nSee 'lumn %s --help' for usage details.", message, command)
+}
+
+func parseHelpTopic(args []string) (string, error) {
+	switch len(args) {
+	case 0:
+		return "", nil
+	case 1:
+		return args[0], nil
+	case 2:
+		if args[0] == "daemon" {
+			return "daemon " + args[1], nil
+		}
+	default:
+	}
+	return "", errors.New("usage: lumn help [command]")
+}
+
+func printHelpTopic(w io.Writer, topic string) bool {
+	switch topic {
+	case "validate":
+		printValidateHelp(w)
+	case "run":
+		printRunHelp(w)
+	case "start":
+		printStartHelp(w)
+	case "stop":
+		printStopHelp(w)
+	case "delete":
+		printDeleteHelp(w)
+	case "restart":
+		printRestartHelp(w)
+	case "list":
+		printListHelp(w)
+	case "watch":
+		printWatchHelp(w)
+	case "logs":
+		printLogsHelp(w)
+	case "daemon":
+		printDaemonHelp(w)
+	case "daemon start":
+		printDaemonStartHelp(w)
+	case "daemon stop":
+		printDaemonStopHelp(w)
+	case "daemon status":
+		printDaemonStatusHelp(w)
+	default:
+		return false
+	}
+	return true
+}
+
+func printMainHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn
+Developer-first workflow runtime for Lua workflows.
+
+Usage:
+  lumn <command> [arguments] [flags]
+  lumn help [command]
+
+Workflow commands:
+  validate    Validate a local workflow file or directory without executing it.
+  run         Execute a workflow locally or trigger a daemon-managed workflow.
+  start       Register a workflow in the daemon.
+  stop        Stop a daemon-managed workflow.
+  delete      Remove a workflow from the daemon permanently.
+  restart     Reload a daemon-managed workflow.
+  list        List workflows registered in the daemon.
+  watch       Open the live workflow TUI (currently a placeholder).
+  logs        Stream workflow logs (currently a placeholder).
+
+Daemon commands:
+  daemon start    Launch the daemon in the background.
+  daemon stop     Shut the daemon down gracefully.
+  daemon status   Show daemon health information.
+
+Selectors:
+  Commands that accept <id|name> support:
+    - full workflow IDs
+    - unique workflow ID prefixes
+    - workflow names
+  If a name matches multiple versions, the workflow tagged "latest" wins.
+
+Entrypoint resolution:
+  lumn run / lumn validate
+      Load ./lumn.lua from the current directory.
+  lumn run -f <directory>
+      Load <directory>/init.lua, then <directory>/lumn.lua.
+  lumn run <selector>
+      Try the daemon first, then a local directory, then <selector>.lua.
+
+Use "lumn <command> --help" for command-specific guidance.
+`)
+}
+
+func printValidateHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn validate
+Validate a workflow file or directory without running it.
+
+Usage:
+  lumn validate
+  lumn validate -f <file|directory>
+
+Resolution:
+  Without -f, validate loads ./lumn.lua in the current directory.
+  With -f <directory>, validate resolves <directory>/init.lua first,
+  then <directory>/lumn.lua.
+  With -f <file>, validate uses the exact file you provided.
+
+Examples:
+  lumn validate
+  lumn validate -f ./lumn.lua
+  lumn validate -f ./workflows/order_cancel
+`)
+}
+
+func printRunHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn run
+Execute a workflow locally or trigger a daemon-managed workflow.
+
+Usage:
+  lumn run
+  lumn run <id|name>
+  lumn run -f <file|directory>
+
+Behavior:
+  Without arguments, run loads ./lumn.lua and executes it locally.
+  With -f, run executes the given local file or directory and skips the daemon.
+  With <id|name>, run tries the daemon first. If the daemon is unavailable or
+  the workflow is not registered there, run falls back to local resolution:
+    1. local directory
+    2. local .lua file (<selector>.lua)
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Examples:
+  lumn run
+  lumn run sales-report
+  lumn run a1b2
+  lumn run -f ./workflows/order_cancel
+  lumn run -f ./cancelamentos.lua
+`)
+}
+
+func printStartHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn start
+Register a workflow in the daemon.
+
+Usage:
+  lumn start
+  lumn start [name[:tag]]
+  lumn start [name[:tag]] -f <file|directory>
+
+Behavior:
+  start always resolves a local workflow target and sends it to the daemon.
+  If name is omitted, lumn infers it from the resolved target.
+  If tag is omitted, lumn uses "latest".
+  Starting the same name:tag again updates the existing workflow in place.
+
+Resolution:
+  Without -f, start resolves ./lumn.lua in the current directory.
+  With -f <directory>, start resolves <directory>/init.lua first,
+  then <directory>/lumn.lua.
+  With -f <file>, start uses the exact file you provided.
+
+Examples:
+  lumn start
+  lumn start cancelamentos
+  lumn start cancelamentos:1.2
+  lumn start pedidos -f ./workflows/order_cancel
+  lumn start finance-sync:2026-03 -f ./finance.lua
+`)
+}
+
+func printSelectorCommandHelp(w io.Writer, command string) {
+	switch command {
+	case "stop":
+		printStopHelp(w)
+	case "delete":
+		printDeleteHelp(w)
+	case "restart":
+		printRestartHelp(w)
+	}
+}
+
+func printStopHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn stop
+Stop a daemon-managed workflow and disable its triggers.
+
+Usage:
+  lumn stop <id|name>
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Examples:
+  lumn stop cancelamentos
+  lumn stop a1b2
+`)
+}
+
+func printDeleteHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn delete
+Remove a workflow from the daemon permanently.
+
+Usage:
+  lumn delete <id|name>
+
+Behavior:
+  delete stops the workflow if it is active, clears queued work, removes
+  triggers, and deletes the workflow record from the daemon store.
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Examples:
+  lumn delete cancelamentos
+  lumn delete a1b2
+`)
+}
+
+func printRestartHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn restart
+Reload a daemon-managed workflow from its registered target.
+
+Usage:
+  lumn restart <id|name>
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Examples:
+  lumn restart cancelamentos
+  lumn restart a1b2
+`)
+}
+
+func printListHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn list
+List workflows currently registered in the daemon.
+
+Usage:
+  lumn list
+
+Columns:
+  ID         Generated workflow ID.
+  NAME       Runtime workflow name.
+  VERSION    Runtime version tag, or "latest".
+  STATUS     Current daemon status.
+  LAST RUN   Timestamp of the most recent execution.
+  FAILS      Number of failed executions since the last workflow update.
+  NEXT RUN   Next scheduled execution time, when available.
+
+Example:
+  lumn list
+`)
+}
+
+func printWatchHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn watch
+Open the live workflow TUI.
+
+Usage:
+  lumn watch
+  lumn watch <id|name>
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Status:
+  The command is registered and validates daemon connectivity, but the
+  interactive TUI is still a placeholder in the current implementation.
+`)
+}
+
+func printLogsHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn logs
+Stream workflow logs from the daemon.
+
+Usage:
+  lumn logs
+  lumn logs <id|name>
+  lumn logs [<id|name>] [--lines <n>] [--no-follow] [--since <duration>] [--level <level>] [--step <name>]
+
+Selectors:
+  <id|name> accepts a full workflow ID, a unique ID prefix, or a workflow name.
+
+Flags:
+  --lines <n>       Show the last n lines before following.
+  --no-follow       Print historical logs only.
+  --since <dur>     Filter logs newer than the given duration.
+  --level <level>   Filter by log level.
+  --step <name>     Filter to a specific workflow step.
+
+Status:
+  The command is registered and validates daemon connectivity, but log streaming
+  is still a placeholder in the current implementation.
+`)
+}
+
+func printDaemonHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn daemon
+Manage the local lumn daemon process.
+
+Usage:
+  lumn daemon <subcommand>
+
+Subcommands:
+  start     Launch the daemon in the background.
+  stop      Stop the daemon gracefully.
+  status    Show daemon health information.
+
+Examples:
+  lumn daemon start
+  lumn daemon stop
+  lumn daemon status
+`)
+}
+
+func printDaemonStartHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn daemon start
+Launch the daemon in the background.
+
+Usage:
+  lumn daemon start
+
+Behavior:
+  start writes daemon logs to the configured state directory and waits until the
+  daemon health endpoint becomes reachable.
+`)
+}
+
+func printDaemonStopHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn daemon stop
+Stop the daemon gracefully.
+
+Usage:
+  lumn daemon stop
+
+Behavior:
+  stop asks the running daemon to shut down cleanly, stopping triggers and
+  waiting for in-flight executions to finish within the shutdown timeout.
+`)
+}
+
+func printDaemonStatusHelp(w io.Writer) {
+	fmt.Fprint(w, `lumn daemon status
+Show daemon health information.
+
+Usage:
+  lumn daemon status
+
+Output:
+  running          Whether the daemon responds to health checks.
+  transport        Socket or pipe used by the CLI.
+  webhook_port     Local HTTP port for webhook triggers.
+  active_workflows Number of active workflows currently loaded.
+  uptime_seconds   Daemon uptime in seconds.
+`)
+}

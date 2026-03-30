@@ -177,7 +177,7 @@ func (q *Queries) LatestExecutionByWorkflow(ctx context.Context, workflowID stri
 }
 
 const listQueuedExecutionVersionsByWorkflow = `-- name: ListQueuedExecutionVersionsByWorkflow :many
-SELECT q.execution_id, w.version
+SELECT q.execution_id, w.name, w.version
 FROM queue q
 JOIN workflows w ON w.id = q.workflow_id
 WHERE q.workflow_id = ?1
@@ -185,6 +185,7 @@ WHERE q.workflow_id = ?1
 
 type ListQueuedExecutionVersionsByWorkflowRow struct {
 	ExecutionID int64
+	Name        string
 	Version     string
 }
 
@@ -197,7 +198,7 @@ func (q *Queries) ListQueuedExecutionVersionsByWorkflow(ctx context.Context, wor
 	var items []ListQueuedExecutionVersionsByWorkflowRow
 	for rows.Next() {
 		var i ListQueuedExecutionVersionsByWorkflowRow
-		if err := rows.Scan(&i.ExecutionID, &i.Version); err != nil {
+		if err := rows.Scan(&i.ExecutionID, &i.Name, &i.Version); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -212,7 +213,7 @@ func (q *Queries) ListQueuedExecutionVersionsByWorkflow(ctx context.Context, wor
 }
 
 const listStaleRunningExecutions = `-- name: ListStaleRunningExecutions :many
-SELECT e.id, e.workflow_id, w.version
+SELECT e.id, e.workflow_id, w.name, w.version
 FROM executions e
 JOIN workflows w ON w.id = e.workflow_id
 WHERE e.status = ?1
@@ -221,6 +222,7 @@ WHERE e.status = ?1
 type ListStaleRunningExecutionsRow struct {
 	ID         int64
 	WorkflowID string
+	Name       string
 	Version    string
 }
 
@@ -233,7 +235,7 @@ func (q *Queries) ListStaleRunningExecutions(ctx context.Context, status string)
 	var items []ListStaleRunningExecutionsRow
 	for rows.Next() {
 		var i ListStaleRunningExecutionsRow
-		if err := rows.Scan(&i.ID, &i.WorkflowID, &i.Version); err != nil {
+		if err := rows.Scan(&i.ID, &i.WorkflowID, &i.Name, &i.Version); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

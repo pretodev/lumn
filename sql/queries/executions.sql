@@ -38,13 +38,13 @@ ORDER BY COALESCE(finished_at, started_at, queued_at) DESC, id DESC
 LIMIT 1;
 
 -- name: ListQueuedExecutionVersionsByWorkflow :many
-SELECT q.execution_id, w.version
+SELECT q.execution_id, w.name, w.version
 FROM queue q
 JOIN workflows w ON w.id = q.workflow_id
 WHERE q.workflow_id = sqlc.arg(workflow_id);
 
 -- name: ListStaleRunningExecutions :many
-SELECT e.id, e.workflow_id, w.version
+SELECT e.id, e.workflow_id, w.name, w.version
 FROM executions e
 JOIN workflows w ON w.id = e.workflow_id
 WHERE e.status = sqlc.arg(status);

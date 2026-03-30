@@ -34,7 +34,7 @@ func (q *Queries) DeleteWorkflow(ctx context.Context, id string) error {
 }
 
 const getWorkflow = `-- name: GetWorkflow :one
-SELECT id, version, path, status, created_at, updated_at
+SELECT id, name, version, path, status, created_at, updated_at
 FROM workflows
 WHERE id = ?1
 `
@@ -44,6 +44,7 @@ func (q *Queries) GetWorkflow(ctx context.Context, id string) (Workflow, error) 
 	var i Workflow
 	err := row.Scan(
 		&i.ID,
+		&i.Name,
 		&i.Version,
 		&i.Path,
 		&i.Status,
@@ -54,10 +55,10 @@ func (q *Queries) GetWorkflow(ctx context.Context, id string) (Workflow, error) 
 }
 
 const listActiveWorkflows = `-- name: ListActiveWorkflows :many
-SELECT id, version, path, status, created_at, updated_at
+SELECT id, name, version, path, status, created_at, updated_at
 FROM workflows
 WHERE status = ?1
-ORDER BY id
+ORDER BY name, version, id
 `
 
 func (q *Queries) ListActiveWorkflows(ctx context.Context, status string) ([]Workflow, error) {
@@ -71,6 +72,7 @@ func (q *Queries) ListActiveWorkflows(ctx context.Context, status string) ([]Wor
 		var i Workflow
 		if err := rows.Scan(
 			&i.ID,
+			&i.Name,
 			&i.Version,
 			&i.Path,
 			&i.Status,
@@ -91,9 +93,9 @@ func (q *Queries) ListActiveWorkflows(ctx context.Context, status string) ([]Wor
 }
 
 const listWorkflows = `-- name: ListWorkflows :many
-SELECT id, version, path, status, created_at, updated_at
+SELECT id, name, version, path, status, created_at, updated_at
 FROM workflows
-ORDER BY id
+ORDER BY name, version, id
 `
 
 func (q *Queries) ListWorkflows(ctx context.Context) ([]Workflow, error) {
@@ -107,6 +109,7 @@ func (q *Queries) ListWorkflows(ctx context.Context) ([]Workflow, error) {
 		var i Workflow
 		if err := rows.Scan(
 			&i.ID,
+			&i.Name,
 			&i.Version,
 			&i.Path,
 			&i.Status,
@@ -144,9 +147,10 @@ func (q *Queries) SetWorkflowStatus(ctx context.Context, arg SetWorkflowStatusPa
 }
 
 const upsertWorkflow = `-- name: UpsertWorkflow :exec
-INSERT INTO workflows (id, version, path, status, created_at, updated_at)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+INSERT INTO workflows (id, name, version, path, status, created_at, updated_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 ON CONFLICT(id) DO UPDATE SET
+  name = excluded.name,
   version = excluded.version,
   path = excluded.path,
   status = excluded.status,
@@ -155,6 +159,7 @@ ON CONFLICT(id) DO UPDATE SET
 
 type UpsertWorkflowParams struct {
 	ID        string
+	Name      string
 	Version   string
 	Path      string
 	Status    string
@@ -165,6 +170,7 @@ type UpsertWorkflowParams struct {
 func (q *Queries) UpsertWorkflow(ctx context.Context, arg UpsertWorkflowParams) error {
 	_, err := q.db.ExecContext(ctx, upsertWorkflow,
 		arg.ID,
+		arg.Name,
 		arg.Version,
 		arg.Path,
 		arg.Status,

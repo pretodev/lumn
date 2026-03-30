@@ -62,7 +62,7 @@ func (d *Daemon) handleWorkflows(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		workflow, err := d.StartWorkflow(payload.Path)
+		workflow, err := d.StartWorkflow(payload.Name, payload.Version, payload.Target)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -86,29 +86,42 @@ func (d *Daemon) handleWorkflowByID(w http.ResponseWriter, req *http.Request) {
 	workflowID := parts[0]
 
 	if len(parts) == 1 {
-		if req.Method != http.MethodDelete {
+		if req.Method == http.MethodDelete {
+			if err := d.DeleteWorkflow(workflowID); err != nil {
+				writeWorkflowError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, daemonapi.WorkflowMutationResponse{
+				WorkflowID: workflowID,
+				Message:    fmt.Sprintf("workflow %s deleted", workflowID),
+			})
+			return
+		}
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	switch parts[1] {
+	case "stop":
+		if req.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		if err := d.StopWorkflow(workflowID); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeWorkflowError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, daemonapi.WorkflowMutationResponse{
 			WorkflowID: workflowID,
 			Message:    fmt.Sprintf("workflow %s stopped", workflowID),
 		})
-		return
-	}
-
-	switch parts[1] {
 	case "restart":
 		if req.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		if err := d.RestartWorkflow(workflowID); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeWorkflowError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, daemonapi.WorkflowMutationResponse{
@@ -122,7 +135,7 @@ func (d *Daemon) handleWorkflowByID(w http.ResponseWriter, req *http.Request) {
 		}
 		executionID, report, err := d.ExecWorkflow(workflowID)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeWorkflowError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, daemonapi.ExecWorkflowResponse{
@@ -136,7 +149,7 @@ func (d *Daemon) handleWorkflowByID(w http.ResponseWriter, req *http.Request) {
 		}
 		bundle, err := d.WorkflowDetails(workflowID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeWorkflowError(w, err)
 			return
 		}
 		resp := daemonapi.WorkflowDetailResponse{
@@ -179,10 +192,12 @@ func summarizeWorkflow(bundle workflowBundle) daemonapi.WorkflowResponse {
 
 	response := daemonapi.WorkflowResponse{
 		ID:       bundle.Workflow.ID,
+		Name:     bundle.Workflow.Name,
 		Version:  bundle.Workflow.Version,
 		Path:     bundle.Workflow.Path,
 		Status:   bundle.Workflow.Status,
 		Triggers: triggers,
+		Fails:    bundle.Fails,
 		NextRun:  nextRun,
 	}
 	if bundle.Latest != nil {
@@ -224,6 +239,14 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, daemonapi.ErrorResponse{Error: message})
+}
+
+func writeWorkflowError(w http.ResponseWriter, err error) {
+	if strings.Contains(err.Error(), "not found") {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeError(w, http.StatusBadRequest, err.Error())
 }
 
 func osGetpid() int {

@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pretodev/lumn/internal/dag"
@@ -15,15 +16,14 @@ import (
 
 type Target struct {
 	Input        string
-	InitPath     string
+	TargetPath   string
+	EntryPath    string
 	WorkspaceDir string
 	WorkflowDir  string
 	Name         string
 }
 
 type Definition struct {
-	ID       string
-	Version  string
 	Triggers []TriggerSpec
 }
 
@@ -32,9 +32,15 @@ type TriggerSpec struct {
 	Config map[string]any
 }
 
+type RunOptions struct {
+	WorkflowName string
+	Version      string
+	TriggerData  map[string]any
+}
+
 func ResolveTarget(input string) (Target, error) {
 	if input == "" {
-		return Target{}, errkind.New(errkind.ErrGeneric, errkind.TypeGeneric, "workflow path is required")
+		return resolveDefaultTarget()
 	}
 
 	absInput, err := filepath.Abs(input)
@@ -47,23 +53,43 @@ func ResolveTarget(input string) (Target, error) {
 		return Target{}, errkind.New(errkind.ErrWorkflowNotFound, errkind.TypeWorkflowNotFound, "workflow not found")
 	}
 
-	target := Target{Input: input}
 	if info.IsDir() {
-		target.WorkflowDir = absInput
-		target.InitPath = filepath.Join(absInput, "init.lua")
-		if _, err := os.Stat(target.InitPath); err != nil {
-			return Target{}, errkind.New(errkind.ErrWorkflowNotFound, errkind.TypeWorkflowNotFound, "workflow init.lua not found")
-		}
-	} else {
-		target.InitPath = absInput
-		target.WorkflowDir = filepath.Dir(absInput)
+		return resolveDirectoryTarget(absInput, input)
 	}
-	target.WorkspaceDir, err = inferWorkspaceDir(target.WorkflowDir)
+
+	return resolveFileTarget(absInput, input)
+}
+
+func ResolveLocalSelector(input string) (Target, error) {
+	if input == "" {
+		return resolveDefaultTarget()
+	}
+
+	absInput, err := filepath.Abs(input)
 	if err != nil {
 		return Target{}, errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, err.Error(), err)
 	}
-	target.Name = filepath.Base(target.WorkflowDir)
-	return target, nil
+
+	info, err := os.Stat(absInput)
+	if err == nil {
+		if info.IsDir() {
+			target, dirErr := resolveDirectoryTarget(absInput, input)
+			if dirErr == nil {
+				return target, nil
+			}
+		} else {
+			return resolveFileTarget(absInput, input)
+		}
+	} else if !os.IsNotExist(err) {
+		return Target{}, errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, err.Error(), err)
+	}
+
+	if strings.HasSuffix(input, ".lua") {
+		return Target{}, errkind.New(errkind.ErrWorkflowNotFound, errkind.TypeWorkflowNotFound, "workflow not found")
+	}
+
+	candidate := input + ".lua"
+	return resolveFileTarget(candidate, candidate)
 }
 
 func LoadTarget(input string, stderr io.Writer) (*dag.Workflow, Target, error) {
@@ -83,7 +109,7 @@ func LoadTarget(input string, stderr io.Writer) (*dag.Workflow, Target, error) {
 		}
 	}()
 
-	workflowRef, err := rt.LoadWorkflow(target.InitPath)
+	workflowRef, err := rt.LoadWorkflow(target.EntryPath)
 	if err != nil {
 		return nil, target, err
 	}
@@ -105,20 +131,26 @@ func ValidateTarget(input string, stderr io.Writer) error {
 }
 
 func RunTarget(input string, stderr io.Writer) (executor.Report, int) {
-	return RunTargetWithOptions(input, stderr, executor.RunOptions{})
+	return RunTargetWithOptions(input, stderr, RunOptions{})
 }
 
-func RunTargetWithOptions(input string, stderr io.Writer, opts executor.RunOptions) (executor.Report, int) {
+func RunTargetWithOptions(input string, stderr io.Writer, opts RunOptions) (executor.Report, int) {
 	start := time.Now()
 	workflow, target, err := LoadTarget(input, stderr)
+	workflowName := resolveWorkflowName(opts.WorkflowName, input, target.Name)
+	version := resolveVersion(opts.Version)
 	if err != nil {
-		report := errorReport(fallbackName(input, target.Name), "", err)
+		report := errorReport(workflowName, version, err)
 		report.DurationMS = time.Since(start).Milliseconds()
 		return report, errkind.ExitStatus(err)
 	}
 	defer workflow.Runtime.Close()
 
-	report, runErr := executor.Run(workflow, opts)
+	report, runErr := executor.Run(workflow, executor.RunOptions{
+		TriggerData: opts.TriggerData,
+	})
+	report.Workflow = workflowName
+	report.Version = version
 	if runErr != nil {
 		report.Status = "error"
 		report.ItemsOut = 0
@@ -143,7 +175,7 @@ func LoadDefinition(input string, stderr io.Writer) (Definition, Target, error) 
 	}
 	defer rt.Close()
 
-	workflowRef, err := rt.LoadWorkflow(target.InitPath)
+	workflowRef, err := rt.LoadWorkflow(target.EntryPath)
 	if err != nil {
 		return Definition{}, target, err
 	}
@@ -157,10 +189,7 @@ func LoadDefinition(input string, stderr io.Writer) (Definition, Target, error) 
 		workflow.Runtime = nil
 	}
 
-	definition := Definition{
-		ID:      workflow.ID,
-		Version: workflow.Version,
-	}
+	definition := Definition{}
 
 	triggersRef, ok := rt.TableRefFieldRef(workflowRef, "triggers")
 	if !ok {
@@ -247,9 +276,102 @@ func fallbackName(input, resolved string) string {
 		return resolved
 	}
 	if input == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			return filepath.Base(cwd)
+		}
 		return "workflow"
 	}
-	return filepath.Base(filepath.Clean(input))
+	base := filepath.Base(filepath.Clean(input))
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+func resolveDefaultTarget() (Target, error) {
+	target, err := resolveFileTarget(filepath.Join(".", "lumn.lua"), "")
+	if err != nil {
+		return Target{}, err
+	}
+	if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+		target.Name = filepath.Base(cwd)
+	}
+	return target, nil
+}
+
+func resolveDirectoryTarget(absDir, input string) (Target, error) {
+	entryPath, err := resolveDirectoryEntrypoint(absDir)
+	if err != nil {
+		return Target{}, err
+	}
+
+	workspaceDir, err := inferWorkspaceDir(absDir)
+	if err != nil {
+		return Target{}, errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, err.Error(), err)
+	}
+
+	return Target{
+		Input:        input,
+		TargetPath:   absDir,
+		EntryPath:    entryPath,
+		WorkspaceDir: workspaceDir,
+		WorkflowDir:  absDir,
+		Name:         filepath.Base(absDir),
+	}, nil
+}
+
+func resolveFileTarget(path, input string) (Target, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return Target{}, errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, err.Error(), err)
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return Target{}, errkind.New(errkind.ErrWorkflowNotFound, errkind.TypeWorkflowNotFound, "workflow not found")
+	}
+	if info.IsDir() {
+		return resolveDirectoryTarget(absPath, input)
+	}
+
+	workflowDir := filepath.Dir(absPath)
+	workspaceDir, err := inferWorkspaceDir(workflowDir)
+	if err != nil {
+		return Target{}, errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, err.Error(), err)
+	}
+
+	return Target{
+		Input:        input,
+		TargetPath:   absPath,
+		EntryPath:    absPath,
+		WorkspaceDir: workspaceDir,
+		WorkflowDir:  workflowDir,
+		Name:         strings.TrimSuffix(filepath.Base(absPath), filepath.Ext(absPath)),
+	}, nil
+}
+
+func resolveDirectoryEntrypoint(absDir string) (string, error) {
+	for _, candidate := range []string{"init.lua", "lumn.lua"} {
+		entryPath := filepath.Join(absDir, candidate)
+		if _, err := os.Stat(entryPath); err == nil {
+			return entryPath, nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", errkind.Wrap(errkind.ErrGeneric, errkind.TypeGeneric, err.Error(), err)
+		}
+	}
+
+	return "", errkind.New(errkind.ErrWorkflowNotFound, errkind.TypeWorkflowNotFound, "workflow entrypoint not found")
+}
+
+func resolveWorkflowName(explicit, input, resolved string) string {
+	if explicit != "" {
+		return explicit
+	}
+	return fallbackName(input, resolved)
+}
+
+func resolveVersion(version string) string {
+	if version != "" {
+		return version
+	}
+	return "latest"
 }
 
 func inferWorkspaceDir(workflowDir string) (string, error) {

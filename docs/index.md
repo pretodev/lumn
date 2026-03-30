@@ -272,7 +272,9 @@ Um workflow opera sobre uma **lista de itens** que flui por uma sequência de pr
 [emails] → call → tap → pipe → distinct → filter → once → pipe → pipe → set → branch → [sent]
 ```
 
-Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/filter` em JavaScript ou pipes em Unix. Quando a lista de itens fica vazia em qualquer ponto do fluxo — por um `filter` sem resultados, por uma fonte sem dados, ou por erros que descartaram todos os itens — o workflow encerra naturalmente com status `"empty"`. Não existe primitivo especial para isso; é o comportamento padrão do runtime.
+Esse modelo é intuitivo para qualquer desenvolvedor que já usou `Array.map/filter` em JavaScript ou pipes em Unix. No runtime atual, a execução sempre começa com lista vazia. Steps como `set` e `filter` são ignorados enquanto o batch estiver vazio, `tap` pode rodar uma vez com `nil`, e `call` pode aparecer em qualquer posição para substituir o estado atual. O status `"empty"` é decidido no fim da execução quando um flow não vazio termina sem itens.
+
+Hoje, a implementação cobre apenas `call`, `tap`, `set` e `filter`. `pipe`, `distinct`, `once`, `branch` e `parallel` permanecem como parte da visão da DSL, mas ainda não estão disponíveis no runtime.
 
 ### Primitivos da DSL
 
@@ -280,7 +282,7 @@ Todos os primitivos usam **sintaxe de table** — `primitivo { chave = valor }`.
 
 | Primitivo  | Contrato                                                                                                                        | Muta o item?   |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| `call`     | Cria a lista de itens a partir de uma fonte externa. `on_data(result)` retorna a forma inicial do item.                         | — (cria itens) |
+| `call`     | Substitui a lista de itens atual a partir de uma fonte externa. `on_data(result)` e opcional e transforma cada resultado bruto. | — (cria itens) |
 | `tap`      | Efeito colateral puro. O callable recebe o item diretamente; o resultado é descartado.                                          | Nunca          |
 | `pipe`     | Chama um callable por item e mergeia o resultado. `on_data(item, result)` retorna o item atualizado.                            | Sim            |
 | `set`      | Transformação Lua pura, sem chamada externa. `to(item)` calcula valores derivados e retorna o item.                             | Sim            |
@@ -294,7 +296,7 @@ Todos os primitivos usam **sintaxe de table** — `primitivo { chave = valor }`.
 
 Estes três primitivos cobrem todos os casos de transformação e têm contratos intencionalmente distintos. Em todos eles, o callable recebe o `item` diretamente — não existe `select` no primitivo. Cada callable declara em sua própria config como quer usar o item (via `query`, `message`, `select` ou qualquer campo que o plugin definir).
 
-**`call`** é o primitivo de _fonte_. Cria a lista de itens do zero. `on_data` recebe o resultado bruto da fonte e retorna a forma inicial do item — não existe `item` anterior porque este é o primeiro step.
+**`call`** é o primitivo de _fonte_. Ele substitui a lista de itens atual a partir do resultado retornado por `exec`. `on_data` é opcional; quando presente, transforma cada resultado bruto em item. Quando ausente, o resultado bruto vira item diretamente.
 
 ```lua
 call {
@@ -410,7 +412,7 @@ lumn.env("SAP_BASE_URL")
 lumn.secret("SAP_CLIENT_SECRET")
 ```
 
-A distinção entre `lumn.env` e `lumn.secret` é intencional: `env` é para configuração não-sensível que pode aparecer em logs e no output de `lumn status`; `secret` é para credenciais que o engine garante nunca serializar.
+A distinção entre `lumn.env` e `lumn.secret` é intencional: `env` é para configuração não-sensível que pode aparecer em logs e no output de `lumn list`; `secret` é para credenciais que o engine garante nunca serializar.
 
 ### Exemplo comentado
 
@@ -932,7 +934,7 @@ lumn.triggers.webhook {
 },
 ```
 
-O daemon expõe os webhooks num servidor HTTP local. A URL gerada é exibida na Web UI e via `lumn status`.
+O daemon expõe os webhooks num servidor HTTP local. A URL gerada é exibida na Web UI e via `lumn daemon status`.
 
 ### File watcher
 
@@ -1182,8 +1184,8 @@ O servidor MCP expõe ferramentas que o LLM pode chamar durante uma conversa:
 | Ferramenta          | O que faz                                                       |
 | ------------------- | --------------------------------------------------------------- |
 | `list_workflows`    | Lista todos os workflows com status, última execução e triggers |
-| `get_workflow`      | Retorna o conteúdo do `init.lua` de um workflow                 |
-| `create_workflow`   | Gera um `init.lua` a partir de descrição em linguagem natural   |
+| `get_workflow`      | Retorna o conteúdo do arquivo de entrypoint de um workflow      |
+| `create_workflow`   | Gera um arquivo de workflow a partir de descrição em linguagem natural |
 | `run_workflow`      | Executa um workflow e retorna resultado estruturado por step    |
 | `get_logs`          | Busca logs por workflow, step, status e intervalo de tempo      |
 | `validate_workflow` | Valida sintaxe e DAG, retorna erros com sugestões de correção   |
@@ -1200,11 +1202,11 @@ Quando o LLM chama `create_workflow`, o servidor MCP injeta automaticamente no c
 - Workflows existentes no projeto (para manter consistência de estilo)
 - Credenciais configuradas (apenas os nomes — para o LLM saber o que referenciar com `lumn.secret`)
 
-Isso permite que o LLM gere `init.lua` correto e idiomático, usando os plugins já instalados, sem precisar adivinhar nomes ou assinar contratos de API.
+Isso permite que o LLM gere o arquivo de workflow correto e idiomático, usando os plugins já instalados, sem precisar adivinhar nomes ou assinar contratos de API.
 
 ### Caso de uso típico
 
-Um desenvolvedor no Cursor descreve o que precisa em linguagem natural. O assistente, com o MCP server do lumn conectado, chama `list_plugins` para ver quais integrações estão disponíveis, depois `create_workflow` com a descrição e retorna um `init.lua` completo — pronto para ser validado com `lumn validate` e ativado com `lumn start`.
+Um desenvolvedor no Cursor descreve o que precisa em linguagem natural. O assistente, com o MCP server do lumn conectado, chama `list_plugins` para ver quais integrações estão disponíveis, depois `create_workflow` com a descrição e retorna um arquivo de workflow completo — pronto para ser validado com `lumn validate` e ativado com `lumn start`.
 
 ---
 
@@ -1302,11 +1304,11 @@ Um endpoint `/health` retorna o status de saúde do daemon e de cada workflow re
 
 ### Modelo de execução
 
-O engine converte o `flow` de um `init.lua` em um **DAG (grafo acíclico dirigido)** de nodes. O executor percorre esse DAG em ordem topológica, respeitando dependências declaradas.
+O engine converte o `flow` do arquivo de workflow em um **DAG (grafo acíclico dirigido)** de nodes. O executor percorre esse DAG em ordem topológica, respeitando dependências declaradas.
 
-Cada node corresponde a um primitivo da DSL: `call`, `tap`, `pipe`, `set`, `filter`, `distinct`, `once`, `branch` e `parallel`. O `call` é sempre o node raiz — é o único primitivo que cria a lista de itens; todos os outros a consomem e transformam.
+No runtime atual, cada node corresponde a um dos primitivos implementados da DSL: `call`, `tap`, `set` e `filter`. O executor inicia com batch vazio, permite `call` em qualquer posição e trata `tap`/`set`/`filter` sobre estado vazio conforme a semântica descrita acima. `pipe`, `distinct`, `once`, `branch` e `parallel` continuam planejados, mas ainda não fazem parte do executor.
 
-Quando a lista de itens fica vazia em qualquer ponto do fluxo — por um `filter` sem resultados, por uma fonte sem dados, ou por erros que ativaram `skip_item` em todos os itens — o workflow encerra com status `"empty"`. Nenhum step posterior é executado. Esse comportamento é automático e não requer primitivo especial.
+Quando o batch fica vazio durante a execução, os steps posteriores continuam sendo avaliados. Isso permite, por exemplo, `tap` sem entrada inicial e `call` posteriores que repovoam o estado. O workflow só termina com status `"empty"` quando chega ao fim sem itens.
 
 O paralelismo é gerenciado por um worker pool de goroutines. Sub-pipelines dentro de `parallel {}` são submetidas ao pool e executadas concorrentemente; o executor aguarda todas antes de continuar para o próximo node.
 
@@ -1320,7 +1322,7 @@ Em vez de expor globals individuais por primitive, o lumn registra um único obj
 - Funções utilitárias (`lumn.env`, `lumn.secret`, `lumn.bearer`, `lumn.date.*`)
 - Namespaces de plugins carregados dinamicamente a partir do `lumn.lock`
 
-Quando o engine carrega um `init.lua`, ele primeiro resolve todos os plugins declarados no projeto, registra seus callables sob `lumn.plugins.*`, e só então executa o arquivo. Isso garante que qualquer referência a `lumn.plugins.outlook` ou `lumn.ai.agent` esteja disponível no momento em que o arquivo é avaliado.
+Quando o engine carrega o arquivo de workflow, ele primeiro resolve todos os plugins declarados no projeto, registra seus callables sob `lumn.plugins.*`, e só então executa o arquivo. Isso garante que qualquer referência a `lumn.plugins.outlook` ou `lumn.ai.agent` esteja disponível no momento em que o arquivo é avaliado.
 
 ### Sandboxing da VM Lua
 
@@ -1364,7 +1366,7 @@ lumn/
 | Critério                         | lumn                   | n8n                  | Airflow            | Temporal           |
 | -------------------------------- | ---------------------- | -------------------- | ------------------ | ------------------ |
 | **Linguagem de definição**       | Lua DSL (arquivo)      | Visual (JSON)        | Python             | Go / Java / TS     |
-| **Estrutura do projeto**         | Pastas com `init.lua`  | BD interno           | Módulos Python     | Código nativo      |
+| **Estrutura do projeto**         | `lumn.lua` ou pastas com `init.lua` | BD interno | Módulos Python | Código nativo |
 | **Versionamento com Git**        | Nativo                 | Export JSON          | Nativo             | Nativo             |
 | **Testabilidade**                | `lumn run` local       | Manual               | pytest             | SDK próprio        |
 | **Instalação**                   | Binário único          | Docker pesado        | pip + infra        | Cluster + servidor |
@@ -1393,7 +1395,7 @@ O desenvolvimento está organizado em fases, cada uma entregando valor utilizáv
 
 ### Phase 0 — Foundation (semanas 1–6)
 
-Engine core: VM Lua embarcada, global `lumn` com primitivos da DSL, DAG builder, executor sequencial e CLI básica (`init`, `run`, `validate`).
+Engine core: VM Lua embarcada, global `lumn` com primitivos da DSL, DAG builder, executor sequencial e CLI básica (`run`, `validate`).
 
 **Milestone:** `lumn run order_cancel/` executa o workflow de cancelamento do tutorial no terminal, mostrando o log de cada step, com output correto e erros com stack trace.
 
@@ -1413,13 +1415,13 @@ Web UI com DAG visualizer em tempo real via WebSocket, execution history complet
 
 Plugin registry baseado em Git com formato `usuario/plugin` e `usuario/path/plugin`, `lumn.lock` para reprodutibilidade, Plugin SDK completo com `CredentialSpec`, biblioteca padrão e sandboxing por subprocess gRPC.
 
-**Milestone:** `lumn plugin add pretodev/outlook` instala o plugin. `lumn credential add outlook` abre o browser para OAuth. `lumn.plugins.outlook {}` funciona no `init.lua` sem configuração adicional.
+**Milestone:** `lumn plugin add pretodev/outlook` instala o plugin. `lumn credential add outlook` abre o browser para OAuth. `lumn.plugins.outlook {}` funciona no arquivo de workflow sem configuração adicional.
 
 ### Phase 4 — MCP + AI (semanas 29–32)
 
 Servidor MCP com todas as ferramentas documentadas, context injection automático de plugins e credenciais disponíveis, e suporte a criação de workflows via linguagem natural.
 
-**Milestone:** Descrever o workflow de cancelamento ao Claude no Cursor. Receber um `init.lua` correto usando os plugins instalados, pronto para `lumn validate` e `lumn start`.
+**Milestone:** Descrever o workflow de cancelamento ao Claude no Cursor. Receber um arquivo de workflow correto usando os plugins instalados, pronto para `lumn validate` e `lumn start`.
 
 ### Phase 5 — Deploy e produção (semanas 33–40)
 
