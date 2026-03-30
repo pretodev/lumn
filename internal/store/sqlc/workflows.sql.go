@@ -131,17 +131,18 @@ func (q *Queries) ListWorkflows(ctx context.Context) ([]Workflow, error) {
 
 const setWorkflowStatus = `-- name: SetWorkflowStatus :exec
 UPDATE workflows
-SET status = ?1
-WHERE id = ?2
+SET status = ?1, updated_at = ?2
+WHERE id = ?3
 `
 
 type SetWorkflowStatusParams struct {
-	Status string
-	ID     string
+	Status    string
+	UpdatedAt time.Time
+	ID        string
 }
 
 func (q *Queries) SetWorkflowStatus(ctx context.Context, arg SetWorkflowStatusParams) error {
-	_, err := q.db.ExecContext(ctx, setWorkflowStatus, arg.Status, arg.ID)
+	_, err := q.db.ExecContext(ctx, setWorkflowStatus, arg.Status, arg.UpdatedAt, arg.ID)
 	return err
 }
 

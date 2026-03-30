@@ -166,8 +166,9 @@ func (s *Store) ListActiveWorkflows() ([]Workflow, error) {
 
 func (s *Store) SetWorkflowStatus(id, status string) error {
 	return s.queries.SetWorkflowStatus(context.Background(), dbsqlc.SetWorkflowStatusParams{
-		Status: status,
-		ID:     id,
+		Status:    status,
+		UpdatedAt: time.Now().UTC(),
+		ID:        id,
 	})
 }
 

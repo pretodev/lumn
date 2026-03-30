@@ -24,8 +24,7 @@ return {
 
 1. `flow` deve ser uma tabela-array.
 2. Se `flow` nao estiver vazio:
-   - O **primeiro no** deve ser `call`.
-   - Nenhum outro `call` pode aparecer apos o primeiro.
+   - A execucao comeca com batch vazio; `call` pode aparecer em qualquer posicao e substitui o batch atual.
    - Cada no deve ser um primitivo valido: `call`, `set`, `filter` ou `tap`.
 3. Um `flow` vazio e valido — o workflow executa sem processar itens.
 

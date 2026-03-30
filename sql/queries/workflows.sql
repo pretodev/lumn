@@ -30,7 +30,7 @@ ORDER BY name, version, id;
 
 -- name: SetWorkflowStatus :exec
 UPDATE workflows
-SET status = sqlc.arg(status)
+SET status = sqlc.arg(status), updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id);
 
 -- name: CountActiveWorkflows :one
