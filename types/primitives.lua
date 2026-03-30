@@ -1,0 +1,92 @@
+---@meta
+
+-- Primitivos globais da DSL lumn.
+-- Estas funcoes sao injetadas no escopo global pelo runtime e usadas para
+-- compor o pipeline de execucao dentro do campo `flow` de um workflow.
+
+---Cria um no de chamada no pipeline. Invoca um callable e injeta os resultados
+---como itens do batch. Deve ser o **primeiro** no do `flow` e nao pode aparecer
+---em outra posicao.
+---
+---Se o callable retornar uma tabela-array, cada elemento se torna um item do batch.
+---Se retornar um valor unico, ele se torna o unico item.
+---
+---A funcao `on_data` (opcional) transforma cada resultado antes de entrar no batch.
+---
+---### Exemplo
+---```lua
+---call {
+---  exec = lumn.from({ "a", "b", "c" }),
+---  on_data = function(result)
+---    return string.upper(result)
+---  end
+---}
+---```
+---
+---@param opts { exec: Callable, on_data?: fun(result: any): any }
+---@return FlowNode
+function call(opts) end
+
+---Cria um no de transformacao no pipeline. Aplica uma funcao a cada item do batch,
+---substituindo-o pelo valor retornado.
+---
+---A funcao `to` recebe o item atual e deve retornar o item transformado.
+---Retornar `nil` gera erro de runtime.
+---
+---### Exemplo
+---```lua
+---set {
+---  to = function(item)
+---    item.processed = true
+---    item.processed_at = os.time()
+---    return item
+---  end
+---}
+---```
+---
+---@param opts { to: fun(item: any): any }
+---@return FlowNode
+function set(opts) end
+
+---Cria um no de filtragem no pipeline. Avalia cada item do batch e remove os que
+---nao satisfazem a condicao.
+---
+---A funcao `condition` recebe o item e deve retornar `true` para manter ou `false`
+---para descartar. Se o batch ficar vazio apos a filtragem, os steps seguintes
+---nao sao executados e o status final e `"empty"`.
+---
+---### Exemplo
+---```lua
+---filter {
+---  condition = function(item)
+---    return item.total > 100
+---  end
+---}
+---```
+---
+---@param opts { condition: fun(item: any): boolean }
+---@return FlowNode
+function filter(opts) end
+
+---Cria um no de efeito colateral no pipeline. Invoca um callable com uma copia
+---de cada item, sem alterar o batch original.
+---
+---O valor retornado pelo callable e descartado. Se o batch estiver vazio,
+---o callable e invocado uma vez com `nil` como input.
+---
+---### Exemplo
+---```lua
+---tap {
+---  exec = {
+---    name = "log_items",
+---    description = "Registra cada item processado",
+---    run = function(item)
+---      print("Item:", item and item.id or "nenhum")
+---    end
+---  }
+---}
+---```
+---
+---@param opts { exec: Callable }
+---@return FlowNode
+function tap(opts) end
